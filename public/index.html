@@ -304,6 +304,8 @@ const cat = {
   toiletT: 0,
   subState: 'free', // 'free' | 'entering' | 'in_sub'
   activeSub: null,
+  bedState: 'free', // 'free' | 'going' | 'sleeping'
+  bedTarget: null,
   color: '#ff9eb5', // pink by default
 };
 
@@ -370,6 +372,36 @@ for (let i = 0; i < TOILET_COUNT; i++) {
     y: rrange(350, SAND_TOP - 280),
     bobSeed: rand() * Math.PI * 2,
     inUse: false,
+  });
+}
+
+// ============================================================
+// Beds (tap to sleep, tap anywhere else to wake)
+// ============================================================
+const BED_COUNT = 6;
+const BED_SCALE = 1.3;
+const BED_COLORS = ['#ff8a8a', '#7ab8ff', '#a89aff', '#7af0c7', '#ffb8a8', '#ffd966'];
+const beds = [];
+for (let i = 0; i < BED_COUNT; i++) {
+  beds.push({
+    x: rrange(500, WORLD_W - 500),
+    y: rrange(400, SAND_TOP - 250),
+    bobSeed: rand() * Math.PI * 2,
+    color: BED_COLORS[i % BED_COLORS.length],
+    inUse: false,
+  });
+}
+
+// Sleep Z particles
+const sleepZs = [];
+let zSpawnT = 0;
+function spawnSleepZ(wx, wy) {
+  sleepZs.push({
+    x: wx, y: wy,
+    vx: 12 + Math.random() * 14,
+    vy: -22 - Math.random() * 14,
+    life: 2.0,
+    size: 14 + Math.random() * 8,
   });
 }
 
@@ -758,25 +790,34 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 function dispatchTap(sx, sy) {
-  // Priority: sub exit (when in sub) → color picker → toilet → sub enter → boop → swim
+  // Priority: sub exit (when in sub) → color picker → wake from bed →
+  //           toilet → sub enter → bed enter → boop → swim
   if (cat.subState === 'in_sub') {
     if (handleSubExitTap(sx, sy)) {
       touchActive = false;
       return;
     }
-    // In sub - tap moves the sub
     touchActive = true;
     return;
   }
+  // Color picker - works even while sleeping (doesn't disturb)
   if (handleColorPickerTap(sx, sy)) {
     touchActive = false;
     return;
+  }
+  // Any other tap wakes a sleeping cat first, then continues processing
+  if (cat.bedState !== 'free') {
+    wakeUp();
   }
   if (handleToiletTap(sx, sy)) {
     touchActive = false;
     return;
   }
   if (handleSubTap(sx, sy)) {
+    touchActive = false;
+    return;
+  }
+  if (handleBedTap(sx, sy)) {
     touchActive = false;
     return;
   }
@@ -792,6 +833,33 @@ canvas.addEventListener('mouseleave', () => { touchActive = false; });
 // Prevent gestures from zooming
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault());
+
+// Bed tap: tap a bed to make the cat go sleep in it
+function handleBedTap(screenX, screenY) {
+  if (cat.subState !== 'free' || cat.toiletState !== 'free') return false;
+  const wx = screenX + camera.x;
+  const wy = screenY + camera.y;
+  for (const b of beds) {
+    if (b.inUse) continue;
+    const dx = wx - b.x, dy = wy - b.y;
+    const tapR = 70 * BED_SCALE;
+    if (dx * dx + dy * dy < tapR * tapR) {
+      cat.bedState = 'going';
+      cat.bedTarget = b;
+      b.inUse = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+function wakeUp() {
+  if (cat.bedState === 'sleeping' || cat.bedState === 'going') {
+    if (cat.bedTarget) cat.bedTarget.inUse = false;
+    cat.bedState = 'free';
+    cat.bedTarget = null;
+  }
+}
 
 // Color picker tap: change cat color when tapping a swatch (only when not in sub)
 function handleColorPickerTap(screenX, screenY) {
@@ -1786,6 +1854,7 @@ function drawCat() {
   ctx.fill();
 
   // Eyes (yellow with vertical pupil)
+  const isSleeping = cat.bedState === 'sleeping';
   if (isHurt) {
     // X_X squinty hurt eyes
     ctx.strokeStyle = 'black';
@@ -1796,6 +1865,16 @@ function drawCat() {
     ctx.moveTo(15, -4); ctx.lineTo(21, -10);
     ctx.moveTo(26, -10); ctx.lineTo(32, -4);
     ctx.moveTo(26, -4); ctx.lineTo(32, -10);
+    ctx.stroke();
+  } else if (isSleeping) {
+    // Cute closed sleeping eyes - upturned U arcs
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(18, -7, 3, 0, Math.PI);
+    ctx.moveTo(32, -7);
+    ctx.arc(29, -7, 3, 0, Math.PI);
     ctx.stroke();
   } else if (!cat.blinking) {
     ctx.fillStyle = '#ffeb1f';
@@ -1993,6 +2072,81 @@ function drawHUD() {
   ctx.beginPath();
   ctx.arc(cx, cy, 3, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawBed(b) {
+  const sx = b.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0008 + b.bobSeed) * 3;
+  const sy = b.y - camera.y + bobY;
+  const cull = 100 * BED_SCALE;
+  if (sx < -cull || sx > W + cull || sy < -cull || sy > H + cull) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(BED_SCALE, BED_SCALE);
+  // Soft underbed shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath();
+  ctx.ellipse(0, 26, 52, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Wooden frame
+  ctx.fillStyle = '#8b5e3c';
+  roundRect(-50, -4, 100, 26, 5);
+  ctx.fill();
+  ctx.strokeStyle = '#5a3a1f';
+  ctx.lineWidth = 1.5;
+  roundRect(-50, -4, 100, 26, 5);
+  ctx.stroke();
+  // Headboard (small at one end)
+  ctx.fillStyle = '#6e4626';
+  roundRect(-52, -22, 12, 30, 3);
+  ctx.fill();
+  ctx.strokeStyle = '#5a3a1f';
+  roundRect(-52, -22, 12, 30, 3);
+  ctx.stroke();
+  // Mattress
+  ctx.fillStyle = '#fff5e8';
+  roundRect(-44, -10, 90, 14, 6);
+  ctx.fill();
+  ctx.strokeStyle = '#a89378';
+  ctx.lineWidth = 1;
+  roundRect(-44, -10, 90, 14, 6);
+  ctx.stroke();
+  // Blanket
+  ctx.fillStyle = b.color;
+  roundRect(-44, -3, 90, 7, 4);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+  ctx.lineWidth = 1;
+  roundRect(-44, -3, 90, 7, 4);
+  ctx.stroke();
+  // Pillow
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.ellipse(-28, -8, 16, 5.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#bbb';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawSleepZs() {
+  for (const z of sleepZs) {
+    const sx = z.x - camera.x, sy = z.y - camera.y;
+    if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) continue;
+    const alpha = Math.max(0, Math.min(1, z.life / 0.7));
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = `bold ${Math.round(z.size)}px -apple-system, sans-serif`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(20,20,40,0.8)';
+    ctx.strokeText('Z', sx, sy);
+    ctx.fillStyle = 'white';
+    ctx.fillText('Z', sx, sy);
+    ctx.restore();
+  }
+  ctx.textAlign = 'start';
 }
 
 function drawColorPicker() {
@@ -2596,6 +2750,40 @@ function loop(t) {
     }
     speed = Math.hypot(cat.vx, cat.vy);
     if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+  } else if (cat.bedState === 'going') {
+    // Auto-swim to the bed
+    const b = cat.bedTarget;
+    if (!b) {
+      cat.bedState = 'free';
+      speed = 0;
+    } else {
+      const targetX = b.x;
+      const targetY = b.y - 14 - 18 * cat.scale; // sit on top of bed
+      const dx = targetX - cat.x, dy = targetY - cat.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 6) {
+        cat.bedState = 'sleeping';
+        cat.x = targetX; cat.y = targetY;
+        cat.vx = 0; cat.vy = 0;
+      } else {
+        const swimSpeed = 380;
+        cat.vx = (dx / dist) * swimSpeed;
+        cat.vy = (dy / dist) * swimSpeed;
+        cat.x += cat.vx * dt;
+        cat.y += cat.vy * dt;
+        if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+      }
+      speed = Math.hypot(cat.vx, cat.vy);
+    }
+  } else if (cat.bedState === 'sleeping') {
+    // Stay put, breathe slowly, spawn Z's
+    cat.vx = 0; cat.vy = 0;
+    zSpawnT -= dt;
+    if (zSpawnT <= 0) {
+      spawnSleepZ(cat.x + cat.facing * 18 * cat.scale, cat.y - 22 * cat.scale);
+      zSpawnT = 0.7 + Math.random() * 0.5;
+    }
+    speed = 0;
   } else if (cat.subState === 'entering') {
     // Auto-swim cat toward the sub, then climb in
     const sub = cat.activeSub;
@@ -2830,8 +3018,8 @@ function loop(t) {
     if (sh.x > WORLD_W - 100) { sh.x = WORLD_W - 100; sh.dir = -1; }
   }
   // Shark-vs-cat collision (gentle hurt with invincibility)
-  // Skipped: when cat is bigger than shark (eating wins), in air, in toilet, or in sub
-  if (cat.invuln <= 0 && cat.toiletState === 'free' && cat.subState === 'free' && cat.y >= SURFACE_Y) {
+  // Skipped: when cat is bigger than shark (eating wins), in air, in toilet, sub, or bed
+  if (cat.invuln <= 0 && cat.toiletState === 'free' && cat.subState === 'free' && cat.bedState === 'free' && cat.y >= SURFACE_Y) {
     const catR = getCatRadius();
     for (const sh of sharks) {
       if (sh.state !== 'roam') continue;
@@ -2852,8 +3040,8 @@ function loop(t) {
     }
   }
 
-  // --- Cat eats anything smaller than itself (only underwater, never in sub) ---
-  if (cat.toiletState === 'free' && cat.subState === 'free' && cat.y >= SURFACE_Y) {
+  // --- Cat eats anything smaller than itself (only when free underwater, never in sub or bed) ---
+  if (cat.toiletState === 'free' && cat.subState === 'free' && cat.bedState === 'free' && cat.y >= SURFACE_Y) {
     const catR = getCatRadius();
     // Eat one small fish per frame (lots of small fish = otherwise mass-spam)
     for (let i = fish.length - 1; i >= 0; i--) {
@@ -2920,6 +3108,17 @@ function loop(t) {
     }
   }
 
+  // Update sleep Z's (drift up and away)
+  for (let i = sleepZs.length - 1; i >= 0; i--) {
+    const z = sleepZs[i];
+    z.x += z.vx * dt;
+    z.y += z.vy * dt;
+    z.vx *= 0.98;
+    z.vy *= 0.98;
+    z.size += dt * 4; // grow slightly
+    z.life -= dt;
+    if (z.life <= 0) sleepZs.splice(i, 1);
+  }
   // Update splash droplets (gravity)
   for (let i = splashes.length - 1; i >= 0; i--) {
     const s = splashes[i];
@@ -3003,6 +3202,8 @@ function loop(t) {
   for (const sh of sharks) drawShark(sh);
   // Toilets (drawn behind cat so cat sits ON them)
   for (const tl of toilets) drawToilet(tl);
+  // Beds (drawn behind cat so cat sleeps ON them)
+  for (const b of beds) drawBed(b);
   // Submarines (in front of fish so they read as vehicles)
   for (const s of subs) drawSub(s);
   // Helmet bubble trail
@@ -3013,6 +3214,8 @@ function loop(t) {
   drawCat();
   // Speech bubble above cat
   drawSpeech();
+  // Sleep Z's (above cat when sleeping)
+  drawSleepZs();
   // Sparks/stars over cat
   drawSparks();
   // Splash droplets (over cat so they appear on her too)
