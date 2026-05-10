@@ -1,0 +1,11 @@
+# Cloudflare Pages cache headers.
+#
+# HTML revalidates against origin every load so deploys land
+# immediately. Audio files keep the default longer cache because
+# they rarely change.
+
+/*.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/Audio/*
+  Cache-Control: public, max-age=86400

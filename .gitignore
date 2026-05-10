@@ -1,0 +1,15 @@
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Sandbox test artifacts (created during dev iteration)
+.bashtest
+.cache-test.txt
+
+# Local-only files we don't need on the hosted version
+# (the .bat and README.txt stay in the repo for documentation,
+# but they're outside public/ so they're not deployed)

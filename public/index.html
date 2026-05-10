@@ -1,0 +1,3035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Sea Kitty</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #001a33;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+  canvas {
+    display: block;
+    touch-action: none;
+  }
+  #splash {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column;
+    background: linear-gradient(180deg, #003a66 0%, #001a33 100%);
+    color: white;
+    z-index: 10;
+    cursor: pointer;
+    padding: 20px;
+    text-align: center;
+  }
+  #splash h1 {
+    font-size: clamp(36px, 8vw, 72px);
+    margin-bottom: 16px;
+    text-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  }
+  #splash p {
+    font-size: clamp(20px, 3.5vw, 32px);
+    opacity: 0.9;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.6; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.05); }
+  }
+</style>
+</head>
+<body>
+  <div id="splash">
+    <h1>Sea Kitty</h1>
+    <p>Tap to start swimming!</p>
+  </div>
+  <canvas id="game"></canvas>
+
+<script>
+"use strict";
+
+// ============================================================
+// Setup
+// ============================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = window.innerWidth, H = window.innerHeight;
+let DPR = Math.min(window.devicePixelRatio || 1, 2); // cap at 2 for perf
+
+function resize() {
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.floor(W * DPR);
+  canvas.height = Math.floor(H * DPR);
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', resize);
+resize();
+
+// ============================================================
+// World constants
+// ============================================================
+const WORLD_W = 12000;
+const WORLD_H = 2000;
+const SAND_TOP = WORLD_H - 80; // y of top of sand layer
+const SURFACE_Y = 60; // y of water surface
+const camera = { x: WORLD_W / 2 - W / 2, y: WORLD_H / 2 - H / 2 };
+
+// Seeded RNG (Mulberry32)
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = makeRng(20260426);
+function rrange(min, max) { return min + rand() * (max - min); }
+function rpick(arr) { return arr[Math.floor(rand() * arr.length)]; }
+
+// ============================================================
+// World population (deterministic - same every play)
+// ============================================================
+
+// Rocks at the seafloor
+const rocks = [];
+for (let i = 0; i < 90; i++) {
+  rocks.push({
+    x: rand() * WORLD_W,
+    y: SAND_TOP + rrange(-10, 30),
+    w: rrange(80, 220),
+    h: rrange(40, 90),
+    shade: rrange(0.7, 1.0),
+  });
+}
+
+// Coral
+const CORAL_COLORS = ['#ff7eb9', '#ff9d6c', '#bb86fc', '#ffd166', '#7af0c7', '#ff6b9d'];
+const corals = [];
+for (let i = 0; i < 260; i++) {
+  corals.push({
+    x: rand() * WORLD_W,
+    y: SAND_TOP - rrange(-10, 20),
+    type: Math.floor(rand() * 4), // 0 branch, 1 brain, 2 fan, 3 anemone
+    color: rpick(CORAL_COLORS),
+    color2: rpick(CORAL_COLORS),
+    size: rrange(28, 75),
+    seed: rand() * 1000,
+  });
+}
+
+// Kelp
+const kelps = [];
+for (let i = 0; i < 110; i++) {
+  kelps.push({
+    x: rand() * WORLD_W,
+    y: SAND_TOP,
+    height: rrange(180, 480),
+    seed: rand() * 1000,
+    shade: rrange(0.85, 1.1),
+  });
+}
+
+// (Kibble food removed - cat now eats live prey instead)
+const foods = [];
+
+// Decorative sea life - small fish (school)
+const FISH_COLORS = ['#ffeb6b', '#6bcfff', '#ff8c6b', '#a3ff6b', '#ffaf6b', '#dca0ff'];
+const fish = [];
+for (let i = 0; i < 90; i++) {
+  fish.push({
+    x: rand() * WORLD_W,
+    y: rrange(120, SAND_TOP - 40),
+    dir: rand() < 0.5 ? 1 : -1,
+    speed: rrange(20, 55),
+    color: rpick(FISH_COLORS),
+    size: rrange(8, 24),
+    wiggle: rand() * Math.PI * 2,
+    bobAmp: rrange(8, 18),
+    bobSpeed: rrange(1.5, 3),
+    bobSeed: rand() * Math.PI * 2,
+  });
+}
+
+// Big slow fish
+const BIG_FISH_COLORS = ['#5d8aa8', '#a87c5d', '#7c8a5d', '#8a5d7c'];
+const bigfish = [];
+for (let i = 0; i < 20; i++) {
+  bigfish.push({
+    x: rand() * WORLD_W,
+    y: rrange(300, SAND_TOP - 200),
+    dir: rand() < 0.5 ? 1 : -1,
+    speed: rrange(8, 18),
+    color: rpick(BIG_FISH_COLORS),
+    size: rrange(32, 90),
+    wiggle: rand() * Math.PI * 2,
+    bobSeed: rand() * Math.PI * 2,
+  });
+}
+
+// Jellyfish
+const JELLY_COLORS = [
+  'rgba(255, 180, 255, 0.45)',
+  'rgba(180, 220, 255, 0.45)',
+  'rgba(255, 220, 180, 0.45)',
+  'rgba(220, 255, 220, 0.45)',
+];
+const jellies = [];
+for (let i = 0; i < 35; i++) {
+  jellies.push({
+    x: rand() * WORLD_W,
+    y: rrange(150, SAND_TOP - 100),
+    color: rpick(JELLY_COLORS),
+    size: rrange(28, 50),
+    bobSeed: rand() * Math.PI * 2,
+    riseSpeed: rrange(4, 10),
+  });
+}
+
+// Seahorses (cute, mostly stationary, drift slowly)
+const SEAHORSE_COLORS = ['#ff9d3c', '#ffd166', '#7af0c7', '#ff6b9d', '#bb86fc', '#ffaf6b'];
+const seahorses = [];
+for (let i = 0; i < 15; i++) {
+  seahorses.push({
+    x: rand() * WORLD_W,
+    y: rrange(200, SAND_TOP - 80),
+    color: rpick(SEAHORSE_COLORS),
+    size: rrange(18, 28),
+    facing: rand() < 0.5 ? 1 : -1,
+    bobSeed: rand() * Math.PI * 2,
+    driftSeed: rand() * Math.PI * 2,
+    homeX: 0, // set below
+    homeY: 0,
+  });
+}
+for (const s of seahorses) { s.homeX = s.x; s.homeY = s.y; }
+
+// Sharks (sparse, can hurt cat - or be scared away by 3 quick taps)
+const SHARK_COLORS = ['#7a8a96', '#6e7a85', '#869098', '#9aa3ab'];
+const sharks = [];
+for (let i = 0; i < 8; i++) {
+  sharks.push({
+    x: rand() * WORLD_W,
+    y: rrange(400, SAND_TOP - 200),
+    dir: rand() < 0.5 ? 1 : -1,
+    speed: rrange(40, 70),
+    baseSpeed: 0, // filled below
+    color: rpick(SHARK_COLORS),
+    size: rrange(55, 80),
+    wiggle: rand() * Math.PI * 2,
+    bobSeed: rand() * Math.PI * 2,
+    boopCount: 0,
+    boopT: 0,         // time of last boop
+    state: 'roam',    // 'roam' | 'flee' | 'gone'
+    fleeT: 0,
+    wobbleT: 0,       // visual wobble after each boop
+    eyeOffset: 0,     // googly eye position
+  });
+}
+for (const sh of sharks) sh.baseSpeed = sh.speed;
+
+// Bubbles (decorative, in world)
+const bubbles = [];
+for (let i = 0; i < 140; i++) {
+  bubbles.push({
+    x: rand() * WORLD_W,
+    y: rand() * WORLD_H,
+    size: rrange(2, 8),
+    speed: rrange(15, 40),
+  });
+}
+
+// Starfish on the sand
+const starfishes = [];
+for (let i = 0; i < 25; i++) {
+  starfishes.push({
+    x: rand() * WORLD_W,
+    y: SAND_TOP + rrange(15, 40),
+    color: rpick(['#ff8c5a', '#ff6b9d', '#ffd166', '#bb86fc']),
+    size: rrange(15, 25),
+    rot: rand() * Math.PI * 2,
+  });
+}
+
+// Sea shells
+const shells = [];
+for (let i = 0; i < 35; i++) {
+  shells.push({
+    x: rand() * WORLD_W,
+    y: SAND_TOP + rrange(20, 50),
+    color: rpick(['#ffe7c4', '#ffd9b8', '#fff0d4', '#f5c8a8']),
+    size: rrange(8, 14),
+    rot: rrange(-0.5, 0.5),
+  });
+}
+
+// ============================================================
+// Cat
+// ============================================================
+const cat = {
+  x: WORLD_W / 2,
+  y: WORLD_H / 2,
+  vx: 0, vy: 0,
+  facing: 1, // 1 = right, -1 = left
+  paddle: 0,
+  tail: 0,
+  blinkT: 0,
+  blinking: false,
+  invuln: 0,    // seconds of post-hit invincibility
+  hurtT: 0,     // seconds since hit (for "ow!" face)
+  scale: 1.0,
+  targetScale: 1.0,
+  toiletState: 'free', // 'free' | 'going' | 'sitting' | 'leaving'
+  toiletTarget: null,
+  toiletT: 0,
+  subState: 'free', // 'free' | 'entering' | 'in_sub'
+  activeSub: null,
+  color: '#ff9eb5', // pink by default
+};
+
+// ============================================================
+// Cat color palette + picker (left edge)
+// ============================================================
+const CAT_COLORS = [
+  '#ff9eb5', // pink (default)
+  '#1a1a1a', // black
+  '#f5f5f5', // white
+  '#888888', // grey
+  '#ff8c3a', // orange
+  '#ffd54a', // yellow
+  '#7af0c7', // mint green
+  '#2d8a4f', // dark green
+  '#5fafff', // blue
+  '#bb86fc', // purple
+  '#e63946', // red
+  '#8b5e3c', // brown
+];
+const PICKER_X = 12;
+const PICKER_Y = 14;
+const SWATCH_SIZE = 36;
+const SWATCH_GAP = 6;
+function getColorSwatchRect(i) {
+  return {
+    x: PICKER_X,
+    y: PICKER_Y + i * (SWATCH_SIZE + SWATCH_GAP),
+    w: SWATCH_SIZE,
+    h: SWATCH_SIZE,
+  };
+}
+function pickerVisible() {
+  return cat.subState !== 'in_sub';
+}
+
+// Luminance helper - whiskers etc adapt to cat color
+function colorLuminance(hex) {
+  const r = parseInt(hex.substr(1, 2), 16) / 255;
+  const g = parseInt(hex.substr(3, 2), 16) / 255;
+  const b = parseInt(hex.substr(5, 2), 16) / 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+function whiskerColor() {
+  return colorLuminance(cat.color) > 0.55 ? 'rgba(60,60,60,0.85)' : 'rgba(255,255,255,0.85)';
+}
+
+const CAT_BASE_RADIUS = 30; // body half-width at scale 1
+const CAT_MIN_SCALE = 0.6;
+const CAT_MAX_SCALE = 5.0;
+function getCatRadius() { return CAT_BASE_RADIUS * cat.scale; }
+function growCat(amt) { cat.targetScale = Math.min(CAT_MAX_SCALE, cat.targetScale + amt); }
+function shrinkCat(amt) { cat.targetScale = Math.max(CAT_MIN_SCALE, cat.targetScale - amt); }
+
+// ============================================================
+// Toilets (floating, tap-to-use)
+// ============================================================
+const TOILET_COUNT = 12;
+const TOILET_SCALE = 1.6;
+const toilets = [];
+for (let i = 0; i < TOILET_COUNT; i++) {
+  toilets.push({
+    x: rrange(500, WORLD_W - 500),
+    y: rrange(350, SAND_TOP - 280),
+    bobSeed: rand() * Math.PI * 2,
+    inUse: false,
+  });
+}
+
+// ============================================================
+// Submarines
+// ============================================================
+const SUB_COUNT = 4;
+const SUB_COLORS = ['#ffd54a', '#ff7e3a', '#3aafff', '#7af0c7'];
+const subs = [];
+for (let i = 0; i < SUB_COUNT; i++) {
+  subs.push({
+    x: rrange(800, WORLD_W - 800),
+    y: rrange(500, SAND_TOP - 250),
+    vx: 0, vy: 0,
+    facing: 1,
+    bobSeed: rand() * Math.PI * 2,
+    color: SUB_COLORS[i % SUB_COLORS.length],
+    inUse: false,
+    propellerT: 0,
+    netted: [], // {type, ent, netX, netY, netVx, netVy}
+  });
+}
+
+// ============================================================
+// Fart particles + sound rate-limit + speech bubble
+// ============================================================
+const farts = [];
+function spawnFart(wx, wy, dir) {
+  for (let i = 0; i < 6; i++) {
+    farts.push({
+      x: wx - dir * (12 + Math.random() * 18),
+      y: wy + (Math.random() - 0.3) * 14,
+      vx: -dir * (8 + Math.random() * 30) + (Math.random() - 0.5) * 20,
+      vy: -10 - Math.random() * 28,
+      size: 7 + Math.random() * 7,
+      life: 1.2 + Math.random() * 0.4,
+      maxLife: 1.4,
+      tint: Math.floor(Math.random() * 3),
+    });
+  }
+}
+function drawFarts() {
+  const tints = [
+    [186, 184, 100],
+    [160, 178, 90],
+    [196, 178, 110],
+  ];
+  for (const f of farts) {
+    const sx = f.x - camera.x, sy = f.y - camera.y;
+    if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) continue;
+    const a = Math.max(0, Math.min(0.55, (f.life / f.maxLife) * 0.55));
+    const c = tints[f.tint];
+    ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+    ctx.beginPath();
+    ctx.arc(sx, sy, f.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+let lastFartSoundAt = -10;
+function fartSound() {
+  const now = performance.now() / 1000;
+  if (now - lastFartSoundAt < 0.4) return;
+  lastFartSoundAt = now;
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const dur = 0.32 + Math.random() * 0.55;
+  const sr = audioCtx.sampleRate;
+  const totalLen = Math.floor((dur + 0.08) * sr);
+  // ---- Noise buffer with built-in chaotic amplitude variation ----
+  const buf = audioCtx.createBuffer(1, totalLen, sr);
+  const data = buf.getChannelData(0);
+  let last = 0;
+  // burst envelope baked into noise: sharp start, irregular sustain
+  for (let i = 0; i < totalLen; i++) {
+    const w = Math.random() * 2 - 1;
+    last = (last + 0.06 * w) / 1.06;
+    // Small chaotic amplitude wiggle on top of LFO
+    const chaos = 0.85 + 0.15 * Math.sin(i * 0.013 + Math.sin(i * 0.0007) * 4);
+    data[i] = last * 4.2 * chaos;
+  }
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+
+  // ---- Initial transient ("blat") - 35ms sharp burst ----
+  const transBuf = audioCtx.createBuffer(1, Math.floor(0.05 * sr), sr);
+  const tData = transBuf.getChannelData(0);
+  for (let i = 0; i < tData.length; i++) {
+    tData[i] = (Math.random() * 2 - 1) * Math.exp(-i / (0.012 * sr));
+  }
+  const trans = audioCtx.createBufferSource();
+  trans.buffer = transBuf;
+  const transFilter = audioCtx.createBiquadFilter();
+  transFilter.type = 'bandpass';
+  transFilter.frequency.value = 380;
+  transFilter.Q.value = 2;
+  const transGain = audioCtx.createGain();
+  transGain.gain.value = 0.5;
+
+  // ---- Filter chain for main body ----
+  const hp = audioCtx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 220;
+  hp.Q.value = 0.7;
+
+  // Bandpass for the "tube resonance" body - slight pitch glide
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass';
+  const bpStart = 380 + Math.random() * 180;
+  bp.frequency.setValueAtTime(bpStart, t0);
+  bp.frequency.exponentialRampToValueAtTime(bpStart * 0.55, t0 + dur);
+  bp.Q.value = 3.5;
+
+  // Final lowpass to soften top end, also closing
+  const lp = audioCtx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(800 + Math.random() * 300, t0);
+  lp.frequency.exponentialRampToValueAtTime(380, t0 + dur);
+  lp.Q.value = 4;
+
+  // ---- Tremolo LFO with rate variation (slightly chaotic) ----
+  const lfoFreq = 32 + Math.random() * 24;
+  const lfo = audioCtx.createOscillator();
+  lfo.type = 'sawtooth';
+  lfo.frequency.setValueAtTime(lfoFreq, t0);
+  // Rate wobbles up then down slightly
+  lfo.frequency.linearRampToValueAtTime(lfoFreq * 1.35, t0 + dur * 0.5);
+  lfo.frequency.linearRampToValueAtTime(lfoFreq * 0.85, t0 + dur);
+  const lfoGain = audioCtx.createGain();
+  lfoGain.gain.value = 0.48;
+
+  // Master envelope
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.001, t0);
+  g.gain.linearRampToValueAtTime(0.5, t0 + 0.025);
+  g.gain.linearRampToValueAtTime(0.38, t0 + dur * 0.55);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+
+  // LFO modulates master gain (creates rrrrr)
+  lfo.connect(lfoGain);
+  lfoGain.connect(g.gain);
+
+  // Wire transient into its own brief path
+  trans.connect(transFilter);
+  transFilter.connect(transGain);
+  transGain.connect(masterGain);
+
+  // Wire main body
+  noise.connect(hp);
+  hp.connect(bp);
+  bp.connect(lp);
+  lp.connect(g);
+  g.connect(masterGain);
+
+  trans.start(t0); trans.stop(t0 + 0.08);
+  noise.start(t0); noise.stop(t0 + dur + 0.05);
+  lfo.start(t0); lfo.stop(t0 + dur + 0.05);
+}
+
+let speechText = null;
+let speechT = 0;
+let lastSpeechAt = -10;
+function showSpeech(text) {
+  const now = performance.now() / 1000;
+  if (now - lastSpeechAt < 2.5) return;
+  lastSpeechAt = now;
+  speechText = text;
+  speechT = 2.2;
+}
+
+// Pre-recorded voice clips (Jack's voice). M4A plays natively on iPad Safari.
+const oopsClips = [
+  new Audio(encodeURI('Audio/oops 1.m4a')),
+  new Audio(encodeURI('Audio/oops 2.m4a')),
+  new Audio(encodeURI('Audio/oops 3.m4a')),
+  new Audio(encodeURI('Audio/who farted.m4a')),
+];
+const toiletClip = new Audio(encodeURI('Audio/go to the toilet.m4a'));
+[...oopsClips, toiletClip].forEach(a => {
+  a.preload = 'auto';
+  a.volume = 1.0;
+});
+
+// iOS Safari needs each Audio element "unlocked" inside a user gesture.
+// We play each silently then immediately pause - that primes them for later .play() calls.
+function primeAudioClips() {
+  [...oopsClips, toiletClip].forEach(a => {
+    a.muted = true;
+    const p = a.play();
+    if (p && p.then) {
+      p.then(() => {
+        a.pause();
+        a.currentTime = 0;
+        a.muted = false;
+      }).catch((err) => {
+        a.muted = false;
+        console.warn('Audio prime failed for', a.src, err);
+      });
+    }
+  });
+}
+
+let lastOopsAt = -10;
+function playRandomOops() {
+  const now = performance.now() / 1000;
+  // Tiny overlap guard - if she chomps a school in 0.3s, don't pile up
+  if (now - lastOopsAt < 0.3) return;
+  lastOopsAt = now;
+  // Stop any in-flight oops clips so the new one is clean
+  oopsClips.forEach(c => { try { c.pause(); c.currentTime = 0; } catch (e) {} });
+  const a = oopsClips[Math.floor(Math.random() * oopsClips.length)];
+  try {
+    a.currentTime = 0;
+    const p = a.play();
+    if (p && p.catch) p.catch(err => console.warn('oops play rejected', err));
+  } catch (e) { console.warn('oops play threw', e); }
+}
+
+function playGoToToilet() {
+  try {
+    toiletClip.currentTime = 0;
+    const p = toiletClip.play();
+    if (p && p.catch) p.catch(err => console.warn('toilet play rejected', err));
+  } catch (e) { console.warn('toilet play threw', e); }
+}
+
+function onEat(growAmt) {
+  growCat(growAmt);
+  spawnFart(cat.x, cat.y + 8 * cat.scale, cat.facing);
+  fartSound();
+  playRandomOops(); // every eat (with 0.3s overlap guard inside)
+}
+
+// ============================================================
+// Respawn factories (so the ocean stays full of fish)
+// ============================================================
+function offscreenX() {
+  const side = Math.random() < 0.5 ? -1 : 1;
+  let x = cat.x + side * (W + 200 + Math.random() * 1500);
+  while (x < 100) x += WORLD_W - 200;
+  while (x > WORLD_W - 100) x -= WORLD_W - 200;
+  return x;
+}
+function makeFish() {
+  return {
+    x: offscreenX(),
+    y: rrange(120, SAND_TOP - 40),
+    dir: rand() < 0.5 ? 1 : -1,
+    speed: rrange(20, 55),
+    color: rpick(FISH_COLORS),
+    size: rrange(8, 24),
+    wiggle: rand() * Math.PI * 2,
+    bobAmp: rrange(8, 18),
+    bobSpeed: rrange(1.5, 3),
+    bobSeed: rand() * Math.PI * 2,
+  };
+}
+function makeBigFish() {
+  return {
+    x: offscreenX(),
+    y: rrange(300, SAND_TOP - 200),
+    dir: rand() < 0.5 ? 1 : -1,
+    speed: rrange(8, 18),
+    color: rpick(BIG_FISH_COLORS),
+    size: rrange(32, 90),
+    wiggle: rand() * Math.PI * 2,
+    bobSeed: rand() * Math.PI * 2,
+  };
+}
+
+// Splash droplets when cat breaches or re-enters water
+const splashes = [];
+function spawnSplash(wx, wy, intensity) {
+  intensity = intensity || 1;
+  const count = Math.floor(10 + 8 * intensity);
+  for (let i = 0; i < count; i++) {
+    const a = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 0.9;
+    const sp = (90 + Math.random() * 180) * intensity;
+    splashes.push({
+      x: wx + (Math.random() - 0.5) * 40,
+      y: wy,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      size: 3 + Math.random() * 5,
+      life: 0.55 + Math.random() * 0.35,
+    });
+  }
+}
+function drawSplashes() {
+  ctx.fillStyle = 'rgba(190, 225, 255, 0.85)';
+  ctx.strokeStyle = 'rgba(140, 200, 255, 0.6)';
+  ctx.lineWidth = 1;
+  for (const s of splashes) {
+    const sx = s.x - camera.x, sy = s.y - camera.y;
+    if (sx < -20 || sx > W + 20 || sy < -20 || sy > H + 20) continue;
+    const r = s.size * Math.max(0.3, s.life * 1.4);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function splashSound(intensity) {
+  if (!audioCtx) return;
+  intensity = intensity || 1;
+  const t0 = audioCtx.currentTime;
+  const dur = 0.22;
+  const n = Math.floor(dur * audioCtx.sampleRate);
+  const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (0.04 * audioCtx.sampleRate));
+  }
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const lp = audioCtx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(2200, t0);
+  lp.frequency.exponentialRampToValueAtTime(450, t0 + dur);
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.28 * Math.min(1.5, intensity), t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  src.connect(lp); lp.connect(g); g.connect(masterGain);
+  src.start(t0); src.stop(t0 + dur + 0.05);
+}
+
+// "Ow!" stars/sparks effect
+const sparks = [];
+function spawnSparks(x, y) {
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + Math.random() * 0.5;
+    sparks.push({
+      x: x, y: y,
+      vx: Math.cos(a) * rrange(60, 140),
+      vy: Math.sin(a) * rrange(60, 140) - 30,
+      life: 0.8,
+      kind: Math.random() < 0.5 ? 'star' : 'spark',
+      rot: Math.random() * Math.PI * 2,
+      vrot: rrange(-6, 6),
+    });
+  }
+}
+
+// ============================================================
+// Input - touch + mouse
+// ============================================================
+let touchActive = false;
+let touchSX = 0, touchSY = 0; // screen coords
+
+function setTouch(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  touchSX = clientX - rect.left;
+  touchSY = clientY - rect.top;
+}
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    setTouch(e.touches[0].clientX, e.touches[0].clientY);
+    dispatchTap(touchSX, touchSY);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    setTouch(e.touches[0].clientX, e.touches[0].clientY);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (e.touches.length === 0) touchActive = false;
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', (e) => {
+  e.preventDefault();
+  touchActive = false;
+}, { passive: false });
+
+canvas.addEventListener('mousedown', (e) => {
+  setTouch(e.clientX, e.clientY);
+  dispatchTap(touchSX, touchSY);
+});
+
+function dispatchTap(sx, sy) {
+  // Priority: sub exit (when in sub) → color picker → toilet → sub enter → boop → swim
+  if (cat.subState === 'in_sub') {
+    if (handleSubExitTap(sx, sy)) {
+      touchActive = false;
+      return;
+    }
+    // In sub - tap moves the sub
+    touchActive = true;
+    return;
+  }
+  if (handleColorPickerTap(sx, sy)) {
+    touchActive = false;
+    return;
+  }
+  if (handleToiletTap(sx, sy)) {
+    touchActive = false;
+    return;
+  }
+  if (handleSubTap(sx, sy)) {
+    touchActive = false;
+    return;
+  }
+  touchActive = true;
+  handleBoop(sx, sy);
+}
+canvas.addEventListener('mousemove', (e) => {
+  if (touchActive) setTouch(e.clientX, e.clientY);
+});
+canvas.addEventListener('mouseup', () => { touchActive = false; });
+canvas.addEventListener('mouseleave', () => { touchActive = false; });
+
+// Prevent gestures from zooming
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('dblclick', (e) => e.preventDefault());
+
+// Color picker tap: change cat color when tapping a swatch (only when not in sub)
+function handleColorPickerTap(screenX, screenY) {
+  if (!pickerVisible()) return false;
+  for (let i = 0; i < CAT_COLORS.length; i++) {
+    const r = getColorSwatchRect(i);
+    if (screenX >= r.x && screenX <= r.x + r.w &&
+        screenY >= r.y && screenY <= r.y + r.h) {
+      cat.color = CAT_COLORS[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+// Sub exit tap: check if tap landed on the GET OUT button (when in_sub).
+const SUB_EXIT_BTN = { x: 20, y: 20, w: 150, h: 60 };
+function handleSubExitTap(screenX, screenY) {
+  if (cat.subState !== 'in_sub') return false;
+  const b = SUB_EXIT_BTN;
+  if (screenX >= b.x && screenX <= b.x + b.w && screenY >= b.y && screenY <= b.y + b.h) {
+    const sub = cat.activeSub;
+    if (sub) {
+      releaseNet(sub); // dump everything in the net out into the world
+      sub.inUse = false;
+      sub.vx = 0; sub.vy = 0;
+      cat.x = sub.x;
+      cat.y = sub.y - 50;
+      cat.vx = 0;
+      cat.vy = -240; // gentle eject upward
+    }
+    cat.subState = 'free';
+    cat.activeSub = null;
+    spawnSplash(cat.x, cat.y + 30, 0.5);
+    return true;
+  }
+  return false;
+}
+
+// Sub enter tap: tap a sub to climb in.
+function handleSubTap(screenX, screenY) {
+  if (cat.subState !== 'free' || cat.toiletState !== 'free') return false;
+  const wx = screenX + camera.x;
+  const wy = screenY + camera.y;
+  for (const sub of subs) {
+    if (sub.inUse) continue;
+    const dx = wx - sub.x, dy = wy - sub.y;
+    const r = 95;
+    if (dx * dx + dy * dy < r * r) {
+      cat.subState = 'entering';
+      cat.activeSub = sub;
+      sub.inUse = true;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Toilet tap detection: tap a toilet to make the cat go to it.
+function handleToiletTap(screenX, screenY) {
+  if (cat.toiletState !== 'free') return false;
+  const wx = screenX + camera.x;
+  const wy = screenY + camera.y;
+  for (const t of toilets) {
+    if (t.inUse) continue;
+    const dx = wx - t.x, dy = wy - t.y;
+    const tapR = 70 * TOILET_SCALE;
+    if (dx * dx + dy * dy < tapR * tapR) {
+      cat.toiletState = 'going';
+      cat.toiletTarget = t;
+      cat.toiletT = 0;
+      t.inUse = true;
+      playGoToToilet();
+      return true;
+    }
+  }
+  return false;
+}
+
+// Boop detection: a fresh tap on a shark counts toward scaring it.
+// 3 boops within 3 seconds = shark flees.
+function handleBoop(screenX, screenY) {
+  const wx = screenX + camera.x;
+  const wy = screenY + camera.y;
+  const now = performance.now() / 1000;
+  for (const sh of sharks) {
+    if (sh.state !== 'roam') continue;
+    // generous hit area sized to the shark
+    const dx = wx - sh.x, dy = wy - sh.y;
+    const r = sh.size * 1.2;
+    if (dx * dx + dy * dy < r * r) {
+      // Reset count if last boop was too long ago
+      if (now - sh.boopT > 3) sh.boopCount = 0;
+      sh.boopCount++;
+      sh.boopT = now;
+      sh.wobbleT = 0.4;
+      boopSound(sh.boopCount);
+      if (sh.boopCount >= 3) {
+        sh.state = 'flee';
+        sh.fleeT = 0;
+        scaredSound();
+        // Flee away from cat
+        const fdx = sh.x - cat.x;
+        sh.dir = fdx >= 0 ? 1 : -1;
+        sh.speed = sh.baseSpeed * 3.2;
+      }
+      return; // only one shark booped per tap
+    }
+  }
+}
+
+// ============================================================
+// Audio (Web Audio API, synthesized)
+// ============================================================
+let audioCtx = null;
+let masterGain = null;
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.5;
+    masterGain.connect(audioCtx.destination);
+  } catch (err) {
+    console.warn('Audio unavailable:', err);
+  }
+}
+
+function chompSound() {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(900, t0);
+  o.frequency.exponentialRampToValueAtTime(220, t0 + 0.18);
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.35, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.18);
+  o.connect(g); g.connect(masterGain);
+  o.start(t0); o.stop(t0 + 0.2);
+}
+
+function bubbleSound() {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  const f0 = 250 + Math.random() * 200;
+  o.frequency.setValueAtTime(f0, t0);
+  o.frequency.linearRampToValueAtTime(f0 + 200, t0 + 0.35);
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.06, t0 + 0.04);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.35);
+  o.connect(g); g.connect(masterGain);
+  o.start(t0); o.stop(t0 + 0.4);
+}
+
+function hurtSound() {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'square';
+  o.frequency.setValueAtTime(380, t0);
+  o.frequency.exponentialRampToValueAtTime(160, t0 + 0.22);
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.18, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.25);
+  o.connect(g); g.connect(masterGain);
+  o.start(t0); o.stop(t0 + 0.27);
+}
+
+function boopSound(n) {
+  // n = 1, 2, 3 - rising pitch each tap
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const base = 600 + (n - 1) * 250;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(base, t0);
+  o.frequency.exponentialRampToValueAtTime(base * 1.5, t0 + 0.1);
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.18, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.12);
+  o.connect(g); g.connect(masterGain);
+  o.start(t0); o.stop(t0 + 0.14);
+}
+
+function scaredSound() {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  // descending zoom-away
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(900, t0);
+  o.frequency.exponentialRampToValueAtTime(180, t0 + 0.5);
+  g.gain.setValueAtTime(0.0, t0);
+  g.gain.linearRampToValueAtTime(0.12, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.5);
+  o.connect(g); g.connect(masterGain);
+  o.start(t0); o.stop(t0 + 0.55);
+}
+
+function celebrateSound() {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  const notes = [523, 659, 784, 1047]; // C E G C
+  notes.forEach((f, i) => {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(f, t0 + i * 0.12);
+    g.gain.setValueAtTime(0.0, t0 + i * 0.12);
+    g.gain.linearRampToValueAtTime(0.2, t0 + i * 0.12 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + i * 0.12 + 0.3);
+    o.connect(g); g.connect(masterGain);
+    o.start(t0 + i * 0.12); o.stop(t0 + i * 0.12 + 0.32);
+  });
+}
+
+let nextBubbleAt = 0;
+
+// ============================================================
+// Splash → start
+// ============================================================
+let started = false;
+function start(e) {
+  if (e) e.preventDefault();
+  if (started) return;
+  started = true;
+  initAudio();
+  // Resume audio if suspended (iOS quirk)
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+  // Prime audio clips inside the user gesture (iOS Safari requirement)
+  primeAudioClips();
+  document.getElementById('splash').style.display = 'none';
+  lastT = performance.now();
+  requestAnimationFrame(loop);
+}
+const splash = document.getElementById('splash');
+splash.addEventListener('touchstart', start, { passive: false });
+splash.addEventListener('mousedown', start);
+
+// ============================================================
+// Drawing
+// ============================================================
+
+function drawBackground() {
+  function depthColor(y) {
+    const t = Math.max(0, Math.min(1, y / WORLD_H));
+    const r = Math.round(20 * (1 - t) + 0 * t);
+    const g = Math.round(140 * (1 - t) + 30 * t);
+    const b = Math.round(200 * (1 - t) + 80 * t);
+    return `rgb(${r},${g},${b})`;
+  }
+  const surfaceScreenY = SURFACE_Y - camera.y;
+  // Sky above the surface (only when visible)
+  if (surfaceScreenY > 0) {
+    const skyTop = Math.max(0, surfaceScreenY - 600);
+    const skyGrad = ctx.createLinearGradient(0, skyTop, 0, surfaceScreenY);
+    skyGrad.addColorStop(0, '#cbe8ff');
+    skyGrad.addColorStop(1, '#e8f5ff');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, Math.min(H, surfaceScreenY));
+  }
+  // Water below the surface
+  const waterTop = Math.max(0, surfaceScreenY);
+  if (waterTop < H) {
+    const grad = ctx.createLinearGradient(0, waterTop, 0, H);
+    grad.addColorStop(0, depthColor(camera.y + waterTop));
+    grad.addColorStop(1, depthColor(camera.y + H));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, waterTop, W, H - waterTop);
+  }
+
+  // Sun rays from above (only visible near surface)
+  if (camera.y < 800) {
+    const fade = 1 - Math.max(0, camera.y / 800);
+    ctx.save();
+    ctx.globalAlpha = 0.08 * fade;
+    ctx.fillStyle = '#fffce8';
+    for (let i = 0; i < 8; i++) {
+      const x = ((i * 1500 + 200) - camera.x * 0.3) % WORLD_W - 200;
+      ctx.beginPath();
+      ctx.moveTo(x, -camera.y);
+      ctx.lineTo(x + 80, -camera.y);
+      ctx.lineTo(x + 160, 500 - camera.y);
+      ctx.lineTo(x - 40, 500 - camera.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Water surface (only if visible)
+  if (camera.y < SURFACE_Y + 20) {
+    const sy = SURFACE_Y - camera.y;
+    ctx.fillStyle = 'rgba(120, 200, 255, 0.5)';
+    ctx.fillRect(0, 0, W, sy);
+    // surface ripples
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let x = -20; x < W + 20; x += 4) {
+      const y = sy + Math.sin((x + camera.x) * 0.04 + Date.now() * 0.002) * 3;
+      if (x === -20) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawSand() {
+  const sy = SAND_TOP - camera.y;
+  if (sy > H) return;
+  // Main sand body
+  const grad = ctx.createLinearGradient(0, sy, 0, sy + 200);
+  grad.addColorStop(0, '#e6c891');
+  grad.addColorStop(1, '#c19f5f');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, sy, W, H - sy);
+
+  // Dunes silhouette
+  ctx.fillStyle = '#b88c4f';
+  ctx.beginPath();
+  ctx.moveTo(0, sy + 30);
+  for (let x = 0; x <= W + 50; x += 60) {
+    const wx = x + camera.x;
+    const dy = Math.sin(wx * 0.005) * 12 + Math.sin(wx * 0.013) * 8;
+    ctx.lineTo(x, sy + 30 + dy);
+  }
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.closePath();
+  ctx.fill();
+
+  // Sand sparkles
+  ctx.fillStyle = 'rgba(255,255,220,0.5)';
+  for (let i = 0; i < 40; i++) {
+    const wx = ((i * 379 + Math.floor(Date.now() * 0.05)) % WORLD_W);
+    const sx = wx - camera.x;
+    if (sx < 0 || sx > W) continue;
+    ctx.fillRect(sx, sy + 50 + (i * 17) % 100, 2, 2);
+  }
+}
+
+function drawShell(s) {
+  const sx = s.x - camera.x, sy = s.y - camera.y;
+  if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(s.rot);
+  ctx.fillStyle = s.color;
+  ctx.beginPath();
+  ctx.arc(0, 0, s.size, Math.PI, Math.PI * 2);
+  ctx.lineTo(-s.size, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(180,140,100,0.5)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 5; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    const a = Math.PI + (i / 5) * Math.PI;
+    ctx.lineTo(Math.cos(a) * s.size, Math.sin(a) * s.size);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawStarfish(s) {
+  const sx = s.x - camera.x, sy = s.y - camera.y;
+  if (sx < -40 || sx > W + 40 || sy < -40 || sy > H + 40) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(s.rot);
+  ctx.fillStyle = s.color;
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const r = (i % 2 === 0) ? s.size : s.size * 0.4;
+    const px = Math.cos(a) * r, py = Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath();
+  ctx.arc(-s.size * 0.2, -s.size * 0.2, s.size * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRock(r) {
+  const sx = r.x - camera.x, sy = r.y - camera.y;
+  if (sx < -300 || sx > W + 300 || sy < -100 || sy > H + 100) return;
+  // Body
+  const baseGrey = 90;
+  const c = Math.round(baseGrey * r.shade);
+  ctx.fillStyle = `rgb(${c},${c+5},${c+10})`;
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Highlight
+  const c2 = Math.round((baseGrey + 30) * r.shade);
+  ctx.fillStyle = `rgb(${c2},${c2+5},${c2+10})`;
+  ctx.beginPath();
+  ctx.ellipse(sx - r.w * 0.15, sy - r.h * 0.25, r.w * 0.3, r.h * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawCoral(c) {
+  const sx = c.x - camera.x, sy = c.y - camera.y;
+  if (sx < -150 || sx > W + 150 || sy < -150 || sy > H + 50) return;
+  const tNow = Date.now() * 0.001;
+  if (c.type === 0) {
+    // Branching coral
+    ctx.strokeStyle = c.color;
+    ctx.lineCap = 'round';
+    for (let b = 0; b < 5; b++) {
+      const sway = Math.sin(tNow + c.seed + b) * 0.05;
+      const angle = -Math.PI / 2 + (b - 2) * 0.3 + sway;
+      const len = c.size * (0.7 + (b === 2 ? 0.3 : 0));
+      ctx.lineWidth = 8 - Math.abs(b - 2);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      const tipX = sx + Math.cos(angle) * len;
+      const tipY = sy + Math.sin(angle) * len;
+      ctx.quadraticCurveTo(sx + Math.cos(angle) * len * 0.5 + sway * 5, sy + Math.sin(angle) * len * 0.5, tipX, tipY);
+      ctx.stroke();
+      // tip dot
+      ctx.fillStyle = c.color2;
+      ctx.beginPath();
+      ctx.arc(tipX, tipY, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (c.type === 1) {
+    // Brain coral
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.arc(sx, sy, Math.max(1, c.size * 0.7), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = c.color2;
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 6; i++) {
+      const r = c.size * 0.5 - i * 3;
+      if (r <= 0.5) break;
+      ctx.beginPath();
+      ctx.arc(sx + (i - 3) * 4, sy + Math.sin(i + c.seed) * 5, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  } else if (c.type === 2) {
+    // Fan coral
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.arc(sx, sy, c.size, Math.PI, Math.PI * 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = c.color2;
+    ctx.lineWidth = 1.5;
+    for (let a = -Math.PI; a <= 0; a += 0.15) {
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(a) * c.size, sy + Math.sin(a) * c.size);
+      ctx.stroke();
+    }
+  } else {
+    // Anemone (wavy tendrils)
+    ctx.fillStyle = c.color2;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy + 5, c.size * 0.5, c.size * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = c.color;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI - Math.PI;
+      const wave = Math.sin(tNow * 1.5 + c.seed + i * 0.5) * 6;
+      const len = c.size * 0.7;
+      ctx.beginPath();
+      ctx.moveTo(sx + Math.cos(a) * c.size * 0.3, sy + Math.sin(a) * c.size * 0.15);
+      ctx.lineTo(
+        sx + Math.cos(a) * c.size * 0.3 + wave + Math.cos(a) * len * 0.2,
+        sy + Math.sin(a) * c.size * 0.15 - len + Math.sin(a) * len * 0.2
+      );
+      ctx.stroke();
+    }
+  }
+}
+
+function drawKelp(k) {
+  const sx = k.x - camera.x;
+  if (sx < -50 || sx > W + 50) return;
+  const baseY = k.y - camera.y;
+  const tNow = Date.now() * 0.001;
+  // Stalk
+  ctx.strokeStyle = `rgba(${Math.round(45 * k.shade)}, ${Math.round(134 * k.shade)}, ${Math.round(89 * k.shade)}, 1)`;
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(sx, baseY);
+  for (let h = 0; h < k.height; h += 12) {
+    const wave = Math.sin(tNow + k.seed + h * 0.04) * (h * 0.06);
+    ctx.lineTo(sx + wave, baseY - h);
+  }
+  ctx.stroke();
+  // Leaves
+  ctx.strokeStyle = `rgba(${Math.round(58 * k.shade)}, ${Math.round(163 * k.shade)}, ${Math.round(113 * k.shade)}, 1)`;
+  ctx.lineWidth = 4;
+  for (let h = 30; h < k.height; h += 35) {
+    const wave = Math.sin(tNow + k.seed + h * 0.04) * (h * 0.06);
+    const side = (h % 70 < 35) ? 1 : -1;
+    ctx.beginPath();
+    ctx.moveTo(sx + wave, baseY - h);
+    ctx.quadraticCurveTo(sx + wave + side * 18, baseY - h - 8, sx + wave + side * 28, baseY - h - 14);
+    ctx.stroke();
+  }
+}
+
+function drawFishShape(size, color, wig, eyeFacing) {
+  // Body
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, size, size * 0.55, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Tail
+  ctx.beginPath();
+  ctx.moveTo(-size * 0.9, 0);
+  ctx.lineTo(-size * 1.5, -size * 0.5 + wig * size * 0.3);
+  ctx.lineTo(-size * 1.5, size * 0.5 + wig * size * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  // Top fin
+  ctx.beginPath();
+  ctx.moveTo(0, -size * 0.5);
+  ctx.lineTo(-size * 0.2, -size * 0.85);
+  ctx.lineTo(size * 0.2, -size * 0.55);
+  ctx.closePath();
+  ctx.fill();
+  // Stripes
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  ctx.fillRect(-size * 0.2, -size * 0.4, size * 0.05, size * 0.8);
+  ctx.fillRect(size * 0.2, -size * 0.4, size * 0.05, size * 0.8);
+  // Eye
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(size * 0.5, -size * 0.15, size * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'black';
+  ctx.beginPath();
+  ctx.arc(size * 0.55 + eyeFacing * size * 0.05, -size * 0.15, size * 0.08, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFish(f) {
+  const sx = f.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.001 * f.bobSpeed + f.bobSeed) * f.bobAmp;
+  const sy = (f.y - camera.y) + bobY;
+  if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(f.dir, 1);
+  drawFishShape(f.size, f.color, Math.sin(f.wiggle), 0.5);
+  ctx.restore();
+}
+
+function drawBigFish(f) {
+  const sx = f.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0008 + f.bobSeed) * 6;
+  const sy = (f.y - camera.y) + bobY;
+  if (sx < -120 || sx > W + 120 || sy < -120 || sy > H + 120) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(f.dir, 1);
+  drawFishShape(f.size, f.color, Math.sin(f.wiggle) * 0.7, 0.5);
+  // Belly highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, f.size * 0.3, f.size * 0.7, f.size * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawJelly(j) {
+  const sx = j.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0008 + j.bobSeed) * 8;
+  const sy = (j.y - camera.y) + bobY;
+  if (sx < -120 || sx > W + 120 || sy < -200 || sy > H + 200) return;
+  // Bell
+  ctx.fillStyle = j.color;
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, j.size, j.size * 0.65, 0, Math.PI, Math.PI * 2);
+  ctx.lineTo(sx - j.size, sy);
+  ctx.closePath();
+  ctx.fill();
+  // Bell shimmer
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(sx - j.size * 0.3, sy - j.size * 0.3, j.size * 0.25, j.size * 0.15, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Tentacles
+  ctx.strokeStyle = j.color;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 7; i++) {
+    const tx = sx - j.size * 0.7 + (i / 6) * j.size * 1.4;
+    ctx.beginPath();
+    ctx.moveTo(tx, sy);
+    for (let h = 4; h < j.size * 1.3; h += 6) {
+      const wig = Math.sin(Date.now() * 0.002 + j.bobSeed + h * 0.1 + i * 0.5) * 4;
+      ctx.lineTo(tx + wig, sy + h);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawSeahorse(s) {
+  const sx = s.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0015 + s.bobSeed) * 4;
+  const sy = (s.y - camera.y) + bobY;
+  if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(s.facing, 1);
+  const sz = s.size;
+  ctx.fillStyle = s.color;
+  // Curled body (S shape via two curves)
+  ctx.beginPath();
+  ctx.moveTo(0, -sz * 0.9);
+  ctx.bezierCurveTo(sz * 0.5, -sz * 0.7, sz * 0.5, -sz * 0.2, 0, 0);
+  ctx.bezierCurveTo(-sz * 0.5, sz * 0.2, -sz * 0.5, sz * 0.6, 0, sz * 0.9);
+  ctx.bezierCurveTo(sz * 0.3, sz * 0.95, sz * 0.5, sz * 0.7, sz * 0.45, sz * 0.4);
+  ctx.bezierCurveTo(sz * 0.1, sz * 0.4, sz * 0.05, sz * 0.1, sz * 0.4, -sz * 0.2);
+  ctx.bezierCurveTo(sz * 0.9, -sz * 0.5, sz * 0.6, -sz, 0, -sz * 0.9);
+  ctx.closePath();
+  ctx.fill();
+  // Head bump / snout
+  ctx.fillStyle = s.color;
+  ctx.beginPath();
+  ctx.ellipse(sz * 0.45, -sz * 0.85, sz * 0.3, sz * 0.18, -0.4, 0, Math.PI * 2);
+  ctx.fill();
+  // Crown spikes
+  ctx.fillStyle = s.color;
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    const cx = -sz * 0.05 + i * sz * 0.18;
+    ctx.moveTo(cx, -sz * 0.95);
+    ctx.lineTo(cx + sz * 0.05, -sz * 1.15);
+    ctx.lineTo(cx + sz * 0.13, -sz * 0.95);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // Belly stripes (lighter)
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath();
+    const ty = -sz * 0.6 + i * sz * 0.35;
+    ctx.moveTo(-sz * 0.15, ty);
+    ctx.lineTo(sz * 0.15, ty);
+    ctx.stroke();
+  }
+  // Eye
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(sz * 0.35, -sz * 0.85, sz * 0.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'black';
+  ctx.beginPath();
+  ctx.arc(sz * 0.38, -sz * 0.85, sz * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawShark(sh) {
+  if (sh.state === 'gone') return;
+  const sx = sh.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0009 + sh.bobSeed) * 5;
+  const sy = (sh.y - camera.y) + bobY;
+  if (sx < -200 || sx > W + 200 || sy < -200 || sy > H + 200) return;
+  const sz = sh.size;
+  const wig = Math.sin(sh.wiggle) * 0.4;
+  ctx.save();
+  ctx.translate(sx, sy);
+  // Wobble after a boop
+  if (sh.wobbleT > 0) {
+    const w = Math.sin(sh.wobbleT * 40) * sh.wobbleT * 0.15;
+    ctx.rotate(w);
+  }
+  ctx.scale(sh.dir, 1);
+
+  const fleeing = (sh.state === 'flee');
+  const scaredFace = fleeing;
+
+  // Tail fin
+  ctx.fillStyle = sh.color;
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.85, 0);
+  ctx.lineTo(-sz * 1.4, -sz * 0.55 + wig * sz * 0.3);
+  ctx.lineTo(-sz * 1.15, 0 + wig * sz * 0.3);
+  ctx.lineTo(-sz * 1.4, sz * 0.45 + wig * sz * 0.3);
+  ctx.closePath();
+  ctx.fill();
+
+  // Body (rounded teardrop, plump = goofy)
+  ctx.beginPath();
+  ctx.ellipse(0, 0, sz, sz * 0.55, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Belly (lighter)
+  ctx.fillStyle = '#e8eef2';
+  ctx.beginPath();
+  ctx.ellipse(0, sz * 0.2, sz * 0.85, sz * 0.3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Dorsal fin
+  ctx.fillStyle = sh.color;
+  ctx.beginPath();
+  ctx.moveTo(-sz * 0.1, -sz * 0.5);
+  ctx.lineTo(sz * 0.1, -sz * 0.95);
+  ctx.lineTo(sz * 0.3, -sz * 0.5);
+  ctx.closePath();
+  ctx.fill();
+
+  // Pectoral fin
+  ctx.beginPath();
+  ctx.moveTo(sz * 0.1, sz * 0.25);
+  ctx.lineTo(-sz * 0.05, sz * 0.7);
+  ctx.lineTo(sz * 0.35, sz * 0.4);
+  ctx.closePath();
+  ctx.fill();
+
+  // Gill slits
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.moveTo(sz * 0.25 + i * 6, -sz * 0.15);
+    ctx.lineTo(sz * 0.25 + i * 6, sz * 0.05);
+    ctx.stroke();
+  }
+
+  // Big googly eye
+  const eyeX = sz * 0.55, eyeY = -sz * 0.18;
+  const eyeR = sz * 0.18;
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(eyeX, eyeY, eyeR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'black';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Pupil
+  ctx.fillStyle = 'black';
+  let pupilOffX = 0, pupilOffY = 0;
+  if (scaredFace) {
+    pupilOffX = -eyeR * 0.4;
+    pupilOffY = -eyeR * 0.3;
+  } else {
+    pupilOffX = eyeR * 0.3;
+    pupilOffY = eyeR * 0.1;
+  }
+  ctx.beginPath();
+  ctx.arc(eyeX + pupilOffX, eyeY + pupilOffY, eyeR * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  // Eye sparkle
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(eyeX + pupilOffX - 1, eyeY + pupilOffY - 1, eyeR * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyebrow (raised when scared)
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  if (scaredFace) {
+    ctx.moveTo(eyeX - eyeR * 1.0, eyeY - eyeR * 1.4);
+    ctx.lineTo(eyeX + eyeR * 1.0, eyeY - eyeR * 1.6);
+  } else {
+    ctx.moveTo(eyeX - eyeR * 0.9, eyeY - eyeR * 1.0);
+    ctx.lineTo(eyeX + eyeR * 0.9, eyeY - eyeR * 1.2);
+  }
+  ctx.stroke();
+
+  // Mouth - silly grin (or frown when scared)
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  if (scaredFace) {
+    // Wavy "oh no" mouth
+    ctx.moveTo(sz * 0.3, sz * 0.18);
+    ctx.quadraticCurveTo(sz * 0.55, sz * 0.28, sz * 0.8, sz * 0.18);
+  } else {
+    // Goofy upward grin
+    ctx.moveTo(sz * 0.25, sz * 0.1);
+    ctx.quadraticCurveTo(sz * 0.55, sz * 0.32, sz * 0.85, sz * 0.05);
+  }
+  ctx.stroke();
+  // One silly tooth
+  if (!scaredFace) {
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.moveTo(sz * 0.55, sz * 0.18);
+    ctx.lineTo(sz * 0.6, sz * 0.28);
+    ctx.lineTo(sz * 0.65, sz * 0.18);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Sweat drops when scared
+  if (scaredFace) {
+    ctx.fillStyle = 'rgba(120, 200, 255, 0.85)';
+    ctx.beginPath();
+    ctx.ellipse(sz * 0.7, -sz * 0.55, 4, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(sz * 0.85, -sz * 0.4, 3, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Boop progress dots above the shark (only while booping in progress)
+  const tNow = performance.now() / 1000;
+  if (sh.state === 'roam' && sh.boopCount > 0 && tNow - sh.boopT < 3) {
+    const dotsY = sy - sz * 0.9;
+    for (let i = 0; i < 3; i++) {
+      const dx = sx + (i - 1) * 14;
+      ctx.fillStyle = i < sh.boopCount ? '#ffeb1f' : 'rgba(255,255,255,0.35)';
+      ctx.beginPath();
+      ctx.arc(dx, dotsY, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+}
+
+function drawSparks() {
+  for (const s of sparks) {
+    const sx = s.x - camera.x, sy = s.y - camera.y;
+    if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) continue;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(s.rot);
+    ctx.globalAlpha = Math.min(1, s.life * 1.5);
+    if (s.kind === 'star') {
+      ctx.fillStyle = '#ffeb1f';
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+        const r = (i % 2 === 0) ? 7 : 3;
+        const px = Math.cos(a) * r, py = Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = '#fff200';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-5, 0); ctx.lineTo(5, 0);
+      ctx.moveTo(0, -5); ctx.lineTo(0, 5);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFood(f) {
+  if (f.eaten) return;
+  const sx = f.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.003 + f.bobSeed) * 3;
+  const sy = (f.y - camera.y) + bobY;
+  if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) return;
+  // Glow
+  ctx.fillStyle = 'rgba(255, 200, 100, 0.3)';
+  ctx.beginPath();
+  ctx.arc(sx, sy, 14, 0, Math.PI * 2);
+  ctx.fill();
+  // Kibble body (little fish-shaped pellet)
+  ctx.fillStyle = '#d97706';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy, 9, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Tail
+  ctx.beginPath();
+  ctx.moveTo(sx - 9, sy);
+  ctx.lineTo(sx - 14, sy - 4);
+  ctx.lineTo(sx - 14, sy + 4);
+  ctx.closePath();
+  ctx.fill();
+  // Tiny dot eye
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(sx + 4, sy - 1, 1.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawCat() {
+  // Cat is inside the sub - hidden (face shows in sub porthole instead)
+  if (cat.subState === 'in_sub') return;
+
+  const sx = cat.x - camera.x;
+  const sy = cat.y - camera.y;
+
+  // Flicker during invincibility (skip every other half-frame)
+  if (cat.invuln > 0 && Math.floor(performance.now() / 80) % 2 === 0) {
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(cat.facing * cat.scale, cat.scale);
+
+  const tailWag = Math.sin(cat.tail);
+  const paddle = Math.sin(cat.paddle);
+  const isHurt = cat.hurtT > 0;
+
+  const bodyColor = cat.color;
+
+  // Tail (behind body)
+  ctx.strokeStyle = bodyColor;
+  ctx.lineWidth = 9;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-25, 5);
+  ctx.quadraticCurveTo(-50, -5 + tailWag * 12, -62, -22 + tailWag * 18);
+  ctx.stroke();
+  // Tail tip
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(-62, -22 + tailWag * 18, 5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Back paws (paddling)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(-12, 22 + paddle * 4, 7, 5, 0.3, 0, Math.PI * 2);
+  ctx.ellipse(-2, 22 - paddle * 4, 7, 5, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.beginPath();
+  ctx.ellipse(0, 5, 30, 19, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body highlight (subtle - shows on dark cats only)
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.ellipse(-5, -2, 18, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Front paws
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(15, 22 + paddle * 3, 7, 5, -0.3, 0, Math.PI * 2);
+  ctx.ellipse(25, 22 - paddle * 3, 7, 5, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Head (drawn after body so it's in front)
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.ellipse(22, -6, 19, 17, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ears
+  ctx.beginPath();
+  ctx.moveTo(11, -19); ctx.lineTo(15, -32); ctx.lineTo(22, -19);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(24, -20); ctx.lineTo(31, -31); ctx.lineTo(34, -19);
+  ctx.closePath();
+  ctx.fill();
+  // Inner ears (pink)
+  ctx.fillStyle = '#ff9eb5';
+  ctx.beginPath();
+  ctx.moveTo(14, -21); ctx.lineTo(16, -28); ctx.lineTo(19, -21);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(26, -22); ctx.lineTo(30, -28); ctx.lineTo(32, -21);
+  ctx.closePath();
+  ctx.fill();
+
+  // Eyes (yellow with vertical pupil)
+  if (isHurt) {
+    // X_X squinty hurt eyes
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(15, -10); ctx.lineTo(21, -4);
+    ctx.moveTo(15, -4); ctx.lineTo(21, -10);
+    ctx.moveTo(26, -10); ctx.lineTo(32, -4);
+    ctx.moveTo(26, -4); ctx.lineTo(32, -10);
+    ctx.stroke();
+  } else if (!cat.blinking) {
+    ctx.fillStyle = '#ffeb1f';
+    ctx.beginPath();
+    ctx.arc(18, -7, 4, 0, Math.PI * 2);
+    ctx.arc(29, -7, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'black';
+    ctx.beginPath();
+    ctx.ellipse(18, -7, 1.2, 3.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(29, -7, 1.2, 3.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Eye sparkle
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.arc(19.5, -8.5, 0.8, 0, Math.PI * 2);
+    ctx.arc(30.5, -8.5, 0.8, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // Closed eyes
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(15, -7); ctx.lineTo(21, -7);
+    ctx.moveTo(26, -7); ctx.lineTo(32, -7);
+    ctx.stroke();
+  }
+
+  // Nose
+  ctx.fillStyle = '#ff9eb5';
+  ctx.beginPath();
+  ctx.moveTo(22, 0); ctx.lineTo(26, 0); ctx.lineTo(24, 3);
+  ctx.closePath();
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = 'black';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (isHurt) {
+    // open "O" mouth
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.ellipse(24, 6, 2.5, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.moveTo(24, 3);
+    ctx.quadraticCurveTo(22, 5, 20, 4);
+    ctx.moveTo(24, 3);
+    ctx.quadraticCurveTo(26, 5, 28, 4);
+    ctx.stroke();
+  }
+
+  // Whiskers (auto-contrast based on body color)
+  ctx.strokeStyle = whiskerColor();
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(27, 1); ctx.lineTo(40, -2);
+  ctx.moveTo(27, 4); ctx.lineTo(40, 5);
+  ctx.moveTo(21, 1); ctx.lineTo(8, -1);
+  ctx.moveTo(21, 4); ctx.lineTo(8, 7);
+  ctx.stroke();
+
+  // Glass dome helmet (over the head)
+  // Outer glass
+  const helmGrad = ctx.createRadialGradient(15, -12, 5, 22, -6, 32);
+  helmGrad.addColorStop(0, 'rgba(220, 240, 255, 0.25)');
+  helmGrad.addColorStop(0.7, 'rgba(150, 200, 255, 0.12)');
+  helmGrad.addColorStop(1, 'rgba(150, 200, 255, 0.05)');
+  ctx.fillStyle = helmGrad;
+  ctx.beginPath();
+  ctx.arc(22, -6, 30, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Helmet outline
+  ctx.strokeStyle = 'rgba(180, 220, 255, 0.85)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(22, -6, 30, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Inner thin highlight ring
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(22, -6, 27, Math.PI * 1.05, Math.PI * 1.45);
+  ctx.stroke();
+
+  // Big shine highlight
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+  ctx.beginPath();
+  ctx.ellipse(8, -18, 6, 9, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.beginPath();
+  ctx.ellipse(2, -10, 2, 4, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Helmet collar (where it meets the body)
+  ctx.fillStyle = 'rgba(180, 220, 255, 0.6)';
+  ctx.beginPath();
+  ctx.ellipse(22, 18, 18, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(140, 180, 220, 0.8)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(22, 18, 18, 4, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawBubbles() {
+  ctx.fillStyle = 'rgba(220, 240, 255, 0.45)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 1;
+  for (const b of bubbles) {
+    const sx = b.x - camera.x, sy = b.y - camera.y;
+    if (sx < -10 || sx > W + 10 || sy < -10 || sy > H + 10) continue;
+    ctx.beginPath();
+    ctx.arc(sx, sy, b.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+// Cat helmet bubbles trail
+const helmetBubbles = [];
+function spawnHelmetBubble() {
+  helmetBubbles.push({
+    x: cat.x + cat.facing * 18 * cat.scale,
+    y: cat.y - 30 * cat.scale,
+    vy: -rrange(20, 50),
+    vx: rrange(-8, 8),
+    size: rrange(2, 5) * Math.sqrt(cat.scale),
+    life: 1.0,
+  });
+}
+
+function drawHelmetBubbles() {
+  ctx.fillStyle = 'rgba(220, 240, 255, 0.6)';
+  for (const b of helmetBubbles) {
+    const sx = b.x - camera.x, sy = b.y - camera.y;
+    if (sx < -10 || sx > W + 10 || sy < -10 || sy > H + 10) continue;
+    ctx.globalAlpha = b.life;
+    ctx.beginPath();
+    ctx.arc(sx, sy, b.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  // Minimap (top-right)
+  const mmW = Math.min(220, W * 0.3);
+  const mmH = mmW * (WORLD_H / WORLD_W);
+  const mmX = W - mmW - 15;
+  const mmY = 15;
+  ctx.fillStyle = 'rgba(0, 20, 40, 0.6)';
+  roundRect(mmX - 4, mmY - 4, mmW + 8, mmH + 8, 8);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(20, 80, 130, 0.8)';
+  ctx.fillRect(mmX, mmY, mmW, mmH);
+  // Sand on minimap
+  ctx.fillStyle = 'rgba(193, 159, 95, 0.7)';
+  const sandH = ((WORLD_H - SAND_TOP) / WORLD_H) * mmH;
+  ctx.fillRect(mmX, mmY + mmH - sandH, mmW, sandH);
+  // Border
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(mmX, mmY, mmW, mmH);
+  // Camera viewport rectangle
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+  ctx.lineWidth = 1;
+  const vx = mmX + (camera.x / WORLD_W) * mmW;
+  const vy = mmY + (camera.y / WORLD_H) * mmH;
+  const vw = (W / WORLD_W) * mmW;
+  const vh = (H / WORLD_H) * mmH;
+  ctx.strokeRect(vx, vy, vw, vh);
+  // Cat dot (always on top, large and bright)
+  const cx = mmX + (cat.x / WORLD_W) * mmW;
+  const cy = mmY + (cat.y / WORLD_H) * mmH;
+  // Outer glow
+  ctx.fillStyle = 'rgba(255, 235, 31, 0.4)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+  ctx.fill();
+  // White ring
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+  ctx.fill();
+  // Black dot
+  ctx.fillStyle = 'black';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawColorPicker() {
+  if (!pickerVisible()) return;
+  for (let i = 0; i < CAT_COLORS.length; i++) {
+    const r = getColorSwatchRect(i);
+    const c = CAT_COLORS[i];
+    const isSelected = (cat.color === c);
+    // Drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    roundRect(r.x + 1, r.y + 2, r.w, r.h, 8);
+    ctx.fill();
+    // Swatch fill
+    ctx.fillStyle = c;
+    roundRect(r.x, r.y, r.w, r.h, 8);
+    ctx.fill();
+    // Border (thicker if selected)
+    if (isSelected) {
+      ctx.strokeStyle = 'white';
+      ctx.lineWidth = 3.5;
+      roundRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2, 9);
+      ctx.stroke();
+      ctx.strokeStyle = '#222';
+      ctx.lineWidth = 1.5;
+      roundRect(r.x - 3, r.y - 3, r.w + 6, r.h + 6, 11);
+      ctx.stroke();
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = 1.5;
+      roundRect(r.x, r.y, r.w, r.h, 8);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawSubExitButton() {
+  if (cat.subState !== 'in_sub') return;
+  const b = SUB_EXIT_BTN;
+  ctx.save();
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  roundRect(b.x + 2, b.y + 3, b.w, b.h, 14);
+  ctx.fill();
+  // Button
+  ctx.fillStyle = '#e64949';
+  roundRect(b.x, b.y, b.w, b.h, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 3;
+  roundRect(b.x, b.y, b.w, b.h, 14);
+  ctx.stroke();
+  // Label
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 24px -apple-system, system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText('GET OUT', b.x + b.w / 2, b.y + b.h / 2);
+  ctx.textAlign = 'start';
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawToilet(t) {
+  const sx = t.x - camera.x;
+  const bobY = Math.sin(Date.now() * 0.0009 + t.bobSeed) * 4;
+  const sy = (t.y - camera.y) + bobY;
+  const cull = 100 * TOILET_SCALE;
+  if (sx < -cull || sx > W + cull || sy < -cull || sy > H + cull) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(TOILET_SCALE, TOILET_SCALE);
+  // Tank (back)
+  ctx.fillStyle = 'white';
+  ctx.strokeStyle = '#7a7a7a';
+  ctx.lineWidth = 1.5;
+  roundRect(-18, -38, 36, 22, 4);
+  ctx.fill();
+  ctx.stroke();
+  // Tank handle (little nub)
+  ctx.fillStyle = '#c0c0c0';
+  ctx.fillRect(15, -34, 4, 6);
+  ctx.strokeRect(15, -34, 4, 6);
+  // Bowl base (curvy)
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.moveTo(-22, -16);
+  ctx.lineTo(22, -16);
+  ctx.lineTo(18, 18);
+  ctx.quadraticCurveTo(0, 24, -18, 18);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Seat (oval ring on top of bowl)
+  ctx.fillStyle = '#ececec';
+  ctx.beginPath();
+  ctx.ellipse(0, -16, 22, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // Bowl water
+  ctx.fillStyle = 'rgba(120, 200, 255, 0.7)';
+  ctx.beginPath();
+  ctx.ellipse(0, -10, 14, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSpeech() {
+  if (!speechText || speechT <= 0) return;
+  const sx = cat.x - camera.x;
+  const sy = cat.y - camera.y - (60 + 30 * cat.scale);
+  const fade = speechT > 1.5 ? (2.0 - speechT) / 0.5 : Math.min(1, speechT / 0.5);
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, fade));
+  ctx.font = 'bold 18px -apple-system, system-ui, sans-serif';
+  const text = speechText;
+  const tw = ctx.measureText(text).width;
+  const padX = 14, bh = 32;
+  const bw = tw + padX * 2;
+  const bx = sx - bw / 2;
+  const by = sy - bh;
+  // Bubble background
+  ctx.fillStyle = 'white';
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 2;
+  roundRect(bx, by, bw, bh, 14);
+  ctx.fill();
+  ctx.stroke();
+  // Tail pointing down toward cat
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.moveTo(sx - 7, by + bh - 1);
+  ctx.lineTo(sx + 1, by + bh + 10);
+  ctx.lineTo(sx + 9, by + bh - 1);
+  ctx.closePath();
+  ctx.fill();
+  // Cover the seam between tail and bubble
+  ctx.strokeStyle = '#222';
+  ctx.beginPath();
+  ctx.moveTo(sx - 7, by + bh);
+  ctx.lineTo(sx + 1, by + bh + 10);
+  ctx.lineTo(sx + 9, by + bh);
+  ctx.stroke();
+  // Text
+  ctx.fillStyle = '#222';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, sx, by + bh / 2);
+  ctx.textAlign = 'start';
+  ctx.restore();
+}
+
+// Draws the trailing fishing net (called inside sub's local transform: facing-flipped)
+function drawSubNet(sub) {
+  const sag = Math.min(14, sub.netted.length * 0.6);
+  // Net frame (where the rope hoop attaches near the back of the sub)
+  const startX = -78;
+  const endX = -190;
+  const topY = -22 + sag * 0.2;
+  const botY = 22 + sag * 0.2;
+  const endTopY = -34 + sag;
+  const endBotY = 34 + sag;
+  // Rope outline
+  ctx.strokeStyle = 'rgba(80, 60, 40, 0.9)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(startX, topY);
+  ctx.lineTo(endX, endTopY);
+  ctx.lineTo(endX, endBotY);
+  ctx.lineTo(startX, botY);
+  ctx.stroke();
+  // Closing line at the end (net bag)
+  ctx.beginPath();
+  ctx.moveTo(endX, endTopY);
+  ctx.quadraticCurveTo(endX - 10, (endTopY + endBotY) / 2, endX, endBotY);
+  ctx.stroke();
+  // Mesh fill (vertical and diagonal)
+  ctx.strokeStyle = 'rgba(110, 85, 55, 0.55)';
+  ctx.lineWidth = 1;
+  const segs = 6;
+  for (let i = 1; i < segs; i++) {
+    const t = i / segs;
+    const x = startX + (endX - startX) * t;
+    const yt = topY + (endTopY - topY) * t;
+    const yb = botY + (endBotY - botY) * t;
+    ctx.beginPath();
+    ctx.moveTo(x, yt);
+    ctx.lineTo(x, yb);
+    ctx.stroke();
+  }
+  // Horizontal mesh (curved across the bag)
+  for (let i = 1; i < 5; i++) {
+    const t = i / 5;
+    ctx.beginPath();
+    ctx.moveTo(startX, topY + (botY - topY) * t);
+    ctx.lineTo(endX, endTopY + (endBotY - endTopY) * t);
+    ctx.stroke();
+  }
+  // Caught creatures wiggling inside the net
+  for (const item of sub.netted) {
+    const wig = Math.sin(item.wig) * 1.5;
+    drawNettedCreature(item, item.netX, item.netY + wig);
+  }
+}
+
+function drawNettedCreature(item, x, y) {
+  const e = item.ent;
+  ctx.save();
+  ctx.translate(x, y);
+  // Tiny silhouette of the creature in its original color
+  if (item.type === 'fish' || item.type === 'bigfish') {
+    const sz = item.type === 'fish' ? Math.max(4, Math.min(8, e.size * 0.5)) : Math.max(7, Math.min(12, e.size * 0.2));
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, sz, sz * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail
+    ctx.beginPath();
+    ctx.moveTo(-sz * 0.85, 0);
+    ctx.lineTo(-sz * 1.4, -sz * 0.4);
+    ctx.lineTo(-sz * 1.4, sz * 0.4);
+    ctx.closePath();
+    ctx.fill();
+  } else if (item.type === 'seahorse') {
+    const sz = Math.max(5, e.size * 0.3);
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, sz * 0.5, sz, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (item.type === 'jelly') {
+    const sz = Math.max(4, e.size * 0.2);
+    // Use solid alpha equivalent of jelly
+    ctx.fillStyle = e.color;
+    ctx.beginPath();
+    ctx.ellipse(0, -sz * 0.3, sz, sz * 0.5, 0, Math.PI, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSub(sub) {
+  const sx = sub.x - camera.x;
+  const isActive = (cat.activeSub === sub && (cat.subState === 'in_sub' || cat.subState === 'entering'));
+  const bobY = isActive ? 0 : Math.sin(Date.now() * 0.001 + sub.bobSeed) * 4;
+  const sy = sub.y - camera.y + bobY;
+  if (sx < -150 || sx > W + 150 || sy < -150 || sy > H + 150) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(sub.facing, 1);
+  // Net (drawn first - hangs behind the sub)
+  drawSubNet(sub);
+  // Tail (drawn first so body covers part)
+  ctx.fillStyle = sub.color;
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-55, -20);
+  ctx.lineTo(-78, -10);
+  ctx.lineTo(-78, 10);
+  ctx.lineTo(-55, 20);
+  ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // Propeller spinning behind tail
+  const prop = sub.propellerT;
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2.5;
+  for (let i = 0; i < 3; i++) {
+    const angle = prop + (i / 3) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(-78, 0);
+    ctx.lineTo(-78 + Math.cos(angle) * 13, Math.sin(angle) * 13);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#666';
+  ctx.beginPath();
+  ctx.arc(-78, 0, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.beginPath();
+  ctx.arc(-78, 0, 4, 0, Math.PI * 2);
+  ctx.stroke();
+  // Main body
+  ctx.fillStyle = sub.color;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 60, 30, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // Belly highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(-5, 10, 50, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Conning tower
+  ctx.fillStyle = sub.color;
+  ctx.beginPath();
+  ctx.moveTo(-15, -22);
+  ctx.lineTo(-12, -38);
+  ctx.lineTo(18, -38);
+  ctx.lineTo(20, -22);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.stroke();
+  // Periscope
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(3, -38);
+  ctx.lineTo(3, -54);
+  ctx.lineTo(13, -54);
+  ctx.stroke();
+  ctx.fillStyle = '#888';
+  ctx.fillRect(11, -57, 6, 6);
+  // Porthole
+  ctx.fillStyle = '#cce8ff';
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(22, -2, 17, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+  // Window glint
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.beginPath();
+  ctx.arc(16, -8, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Cat face peeking out (when active) - uses cat.color
+  if (isActive) {
+    ctx.fillStyle = cat.color;
+    ctx.beginPath();
+    ctx.arc(22, 0, 12, 0, Math.PI * 2);
+    ctx.fill();
+    // Ears
+    ctx.beginPath();
+    ctx.moveTo(15, -8); ctx.lineTo(13, -14); ctx.lineTo(19, -8);
+    ctx.moveTo(25, -8); ctx.lineTo(31, -14); ctx.lineTo(29, -8);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#ffeb1f';
+    ctx.beginPath();
+    ctx.arc(19, -2, 2.5, 0, Math.PI * 2);
+    ctx.arc(26, -2, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'black';
+    ctx.beginPath();
+    ctx.ellipse(19, -2, 0.7, 1.8, 0, 0, Math.PI * 2);
+    ctx.ellipse(26, -2, 0.7, 1.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Tiny nose
+    ctx.fillStyle = '#ff9eb5';
+    ctx.beginPath();
+    ctx.moveTo(21, 3); ctx.lineTo(24, 3); ctx.lineTo(22.5, 5);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // Front fin/window markings
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(46, 0, 6, -Math.PI / 2, Math.PI / 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Net catches fish-types; sharks just get bumped aside (their existing dynamics survive)
+function netNearby(sub) {
+  const subR = 70;
+  const netCatchR = 95; // net's effective catch radius (a bit bigger than the body)
+  function tryCatch(arr, type) {
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const e = arr[i];
+      const dx = e.x - sub.x, dy = e.y - sub.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < netCatchR) {
+        sub.netted.push({
+          type: type,
+          ent: e,
+          netX: -100 - Math.random() * 70,    // x inside net (relative to sub)
+          netY: (Math.random() - 0.5) * 28,    // y inside net
+          netVx: (Math.random() - 0.5) * 30,
+          netVy: (Math.random() - 0.5) * 30,
+          wig: Math.random() * Math.PI * 2,
+        });
+        arr.splice(i, 1);
+      }
+    }
+  }
+  tryCatch(fish, 'fish');
+  tryCatch(bigfish, 'bigfish');
+  tryCatch(seahorses, 'seahorse');
+  tryCatch(jellies, 'jelly');
+  // Sharks still get physically bumped (no netting)
+  for (const sh of sharks) {
+    if (sh.state === 'gone') continue;
+    const dx = sh.x - sub.x, dy = sh.y - sub.y;
+    const dist = Math.hypot(dx, dy);
+    const minDist = subR + sh.size * 0.5;
+    if (dist > 0.5 && dist < minDist) {
+      const overlap = (minDist - dist) * 1.2;
+      sh.x += (dx / dist) * overlap;
+      sh.y += (dy / dist) * overlap;
+      if (sh.state === 'roam') {
+        sh.dir = dx >= 0 ? 1 : -1;
+      }
+    }
+  }
+}
+
+function releaseNet(sub) {
+  for (const item of sub.netted) {
+    const e = item.ent;
+    // Drop them at sub position with a scattered offset and direction
+    e.x = sub.x + (Math.random() - 0.5) * 100;
+    e.y = sub.y + (Math.random() - 0.5) * 60;
+    // Outward boost - they zoom away from the sub for ~1.5s then ease back to normal
+    const dxSub = e.x - sub.x;
+    const dySub = e.y - sub.y;
+    const dist = Math.max(1, Math.hypot(dxSub, dySub));
+    const boostSpeed = 280 + Math.random() * 120;
+    e.boostVx = (dxSub / dist) * boostSpeed;
+    e.boostVy = (dySub / dist) * boostSpeed;
+    e.boostT = 1.4 + Math.random() * 0.5;
+    if ('dir' in e) e.dir = dxSub >= 0 ? 1 : -1;
+    if (item.type === 'fish') fish.push(e);
+    else if (item.type === 'bigfish') bigfish.push(e);
+    else if (item.type === 'seahorse') {
+      e.homeX = e.x;
+      e.homeY = e.y;
+      seahorses.push(e);
+    }
+    else if (item.type === 'jelly') jellies.push(e);
+  }
+  sub.netted = [];
+}
+
+// Apply post-release boost outward (decays over its boostT timer)
+function applyBoost(e, dt) {
+  if (!e.boostT || e.boostT <= 0) return;
+  // Seahorses bind to homeX/homeY - drift their home to follow boost
+  if ('homeX' in e) {
+    e.homeX += e.boostVx * dt;
+    e.homeY += e.boostVy * dt;
+  } else {
+    e.x += e.boostVx * dt;
+    e.y += e.boostVy * dt;
+  }
+  const decay = Math.pow(0.25, dt);
+  e.boostVx *= decay;
+  e.boostVy *= decay;
+  e.boostT -= dt;
+  if (e.boostT <= 0) { e.boostVx = 0; e.boostVy = 0; }
+}
+
+// Celebration confetti when all food eaten
+const confetti = [];
+let allEatenCelebrated = false;
+function spawnConfetti() {
+  for (let i = 0; i < 60; i++) {
+    confetti.push({
+      x: cat.x + rrange(-100, 100),
+      y: cat.y + rrange(-80, 80),
+      vx: rrange(-100, 100),
+      vy: rrange(-150, -50),
+      color: rpick(['#ff6b9d', '#ffeb1f', '#7af0c7', '#bb86fc', '#ff9d6c']),
+      size: rrange(4, 9),
+      rot: rand() * Math.PI * 2,
+      vrot: rrange(-5, 5),
+      life: 2.5,
+    });
+  }
+}
+function drawConfetti() {
+  for (const c of confetti) {
+    const sx = c.x - camera.x, sy = c.y - camera.y;
+    if (sx < -30 || sx > W + 30 || sy < -30 || sy > H + 30) continue;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(c.rot);
+    ctx.globalAlpha = Math.min(1, c.life);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.size / 2, -c.size / 4, c.size, c.size / 2);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ============================================================
+// Main loop
+// ============================================================
+let lastT = 0;
+let bubbleTrailT = 0;
+
+// Persistent on-screen error display
+let lastError = null;
+let lastErrorAt = 0;
+function showError(err) {
+  lastError = err;
+  lastErrorAt = performance.now();
+  console.error('Loop error:', err);
+}
+function drawErrorOverlay() {
+  if (!lastError) return;
+  // fade out after 8 seconds
+  const age = (performance.now() - lastErrorAt) / 1000;
+  if (age > 8) { lastError = null; return; }
+  const alpha = age > 6 ? (8 - age) / 2 : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const boxH = 90;
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(10, H - boxH - 10, W - 20, boxH);
+  ctx.fillStyle = '#ff6b6b';
+  ctx.font = 'bold 14px monospace';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Error: ' + (lastError.message || lastError).toString().slice(0, 100), 20, H - boxH);
+  if (lastError.stack) {
+    ctx.fillStyle = '#ffaaaa';
+    ctx.font = '12px monospace';
+    const lines = lastError.stack.split('\n').slice(1, 4);
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i].trim().slice(0, 110), 20, H - boxH + 22 + i * 16);
+    }
+  }
+  ctx.restore();
+}
+
+function loop(t) {
+  try {
+  const dt = Math.min(50, t - lastT) / 1000;
+  lastT = t;
+
+  // --- Cat movement ---
+  let speed = 0;
+  if (cat.toiletState === 'going') {
+    // Auto-swim to toilet seat position (so cat sits ON top of the seat)
+    const t = cat.toiletTarget;
+    const targetX = t.x;
+    const targetY = t.y - 22 * TOILET_SCALE - 18 * cat.scale; // sit on the seat
+    const dx = targetX - cat.x, dy = targetY - cat.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 6) {
+      cat.toiletState = 'sitting';
+      cat.toiletT = 3.0;
+      cat.x = targetX;
+      cat.y = targetY;
+      cat.vx = 0; cat.vy = 0;
+      shrinkCat(0.1);
+      // First arrival toot
+      spawnFart(cat.x, cat.y + 14 * cat.scale, cat.facing);
+      fartSound();
+    } else {
+      const swimSpeed = 420;
+      cat.vx = (dx / dist) * swimSpeed;
+      cat.vy = (dy / dist) * swimSpeed;
+      cat.x += cat.vx * dt;
+      cat.y += cat.vy * dt;
+      if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+    }
+    speed = Math.hypot(cat.vx, cat.vy);
+  } else if (cat.toiletState === 'sitting') {
+    cat.toiletT -= dt;
+    cat.vx = 0; cat.vy = 0;
+    // Occasional toot while sitting
+    if (Math.random() < dt * 1.2) {
+      spawnFart(cat.x, cat.y + 10 * cat.scale, cat.facing);
+      if (Math.random() < 0.3) fartSound();
+    }
+    if (cat.toiletT <= 0) {
+      // Begin leaving - auto-swim away from toilet
+      if (cat.toiletTarget) cat.toiletTarget.inUse = false;
+      cat.toiletState = 'leaving';
+      cat.toiletT = 0.75;
+      cat.vy = -360;
+      cat.vx = cat.facing * 260;
+    }
+    speed = 0;
+  } else if (cat.toiletState === 'leaving') {
+    // Brief auto-swim away, ignoring player input, to clear the tap radius
+    cat.toiletT -= dt;
+    cat.x += cat.vx * dt;
+    cat.y += cat.vy * dt;
+    // Light drag so she eases out, doesn't stop dead
+    cat.vx *= Math.pow(0.35, dt);
+    cat.vy *= Math.pow(0.35, dt);
+    if (cat.toiletT <= 0) {
+      cat.toiletState = 'free';
+      cat.toiletTarget = null;
+    }
+    speed = Math.hypot(cat.vx, cat.vy);
+    if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+  } else if (cat.subState === 'entering') {
+    // Auto-swim cat toward the sub, then climb in
+    const sub = cat.activeSub;
+    if (!sub) {
+      cat.subState = 'free';
+      speed = 0;
+    } else {
+      const dx = sub.x - cat.x, dy = sub.y - cat.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 30) {
+        cat.subState = 'in_sub';
+        cat.x = sub.x; cat.y = sub.y;
+        cat.vx = 0; cat.vy = 0;
+      } else {
+        const swimSpeed = 420;
+        cat.vx = (dx / dist) * swimSpeed;
+        cat.vy = (dy / dist) * swimSpeed;
+        cat.x += cat.vx * dt;
+        cat.y += cat.vy * dt;
+        if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+      }
+      speed = Math.hypot(cat.vx, cat.vy);
+    }
+  } else if (cat.subState === 'in_sub') {
+    const sub = cat.activeSub;
+    const wasUnderwaterSub = sub.y >= SURFACE_Y;
+    if (sub.y >= SURFACE_Y) {
+      // UNDERWATER sub physics - fast and momentumy
+      if (touchActive) {
+        const wx = touchSX + camera.x;
+        const wy = touchSY + camera.y;
+        const dx = wx - sub.x, dy = wy - sub.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 8) {
+          const accel = 1100;
+          sub.vx += (dx / dist) * accel * dt;
+          sub.vy += (dy / dist) * accel * dt;
+        }
+      }
+      const drag = Math.pow(0.18, dt);
+      sub.vx *= drag;
+      sub.vy *= drag;
+      const subSpeed = Math.hypot(sub.vx, sub.vy);
+      const subMax = 600;
+      if (subSpeed > subMax) {
+        sub.vx = (sub.vx / subSpeed) * subMax;
+        sub.vy = (sub.vy / subSpeed) * subMax;
+      }
+    } else {
+      // IN AIR - weaker gravity than the cat (so sub jumps higher)
+      sub.vy += 500 * dt;
+      sub.vx *= Math.pow(0.85, dt); // very light air drag
+    }
+    sub.x += sub.vx * dt;
+    sub.y += sub.vy * dt;
+    // Clamp - sub can rise high above water
+    sub.x = Math.max(80, Math.min(WORLD_W - 80, sub.x));
+    sub.y = Math.max(SURFACE_Y - 500, Math.min(SAND_TOP - 50, sub.y));
+    if (Math.abs(sub.vx) > 25) sub.facing = sub.vx > 0 ? 1 : -1;
+    // Camera tracks the sub via cat position
+    cat.x = sub.x;
+    cat.y = sub.y;
+    cat.facing = sub.facing;
+    speed = Math.hypot(sub.vx, sub.vy);
+    sub.propellerT += dt * (5 + speed * 0.04);
+    netNearby(sub);
+    // Wiggle netted creatures inside the net
+    for (const item of sub.netted) {
+      item.netX += item.netVx * dt;
+      item.netY += item.netVy * dt;
+      // Bounce inside net bag
+      if (item.netX < -180) { item.netX = -180; item.netVx = Math.abs(item.netVx); }
+      if (item.netX > -85) { item.netX = -85; item.netVx = -Math.abs(item.netVx); }
+      if (item.netY < -25) { item.netY = -25; item.netVy = Math.abs(item.netVy); }
+      if (item.netY > 25) { item.netY = 25; item.netVy = -Math.abs(item.netVy); }
+      item.netVx *= 0.96;
+      item.netVy *= 0.96;
+      item.wig += dt * 6;
+    }
+    // Surface crossing splash
+    const isUnderwaterSubNow = sub.y >= SURFACE_Y;
+    if (wasUnderwaterSub !== isUnderwaterSubNow) {
+      const intensity = Math.min(2.0, Math.abs(sub.vy) / 220 + 0.5);
+      spawnSplash(sub.x, SURFACE_Y, intensity);
+      splashSound(intensity);
+    }
+    // Propeller bubbles trail (only underwater)
+    if (sub.y >= SURFACE_Y && Math.random() < dt * 12) {
+      helmetBubbles.push({
+        x: sub.x - sub.facing * 78,
+        y: sub.y + (Math.random() - 0.5) * 16,
+        vy: -10 - Math.random() * 30,
+        vx: -sub.facing * (40 + Math.random() * 40),
+        size: 3 + Math.random() * 4,
+        life: 1.0,
+      });
+    }
+  } else {
+    // FREE - normal player control. Different physics in air vs water.
+    const wasUnderwater = cat.y >= SURFACE_Y;
+    if (cat.y >= SURFACE_Y) {
+      // UNDERWATER - swim physics
+      if (touchActive) {
+        const wx = touchSX + camera.x;
+        const wy = touchSY + camera.y;
+        const dx = wx - cat.x, dy = wy - cat.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > 8) {
+          const accel = 700;
+          cat.vx += (dx / dist) * accel * dt;
+          cat.vy += (dy / dist) * accel * dt;
+        }
+      }
+      const drag = Math.pow(0.04, dt);
+      cat.vx *= drag;
+      cat.vy *= drag;
+      speed = Math.hypot(cat.vx, cat.vy);
+      const maxSpeed = 380;
+      if (speed > maxSpeed) {
+        cat.vx = (cat.vx / speed) * maxSpeed;
+        cat.vy = (cat.vy / speed) * maxSpeed;
+        speed = maxSpeed;
+      }
+    } else {
+      // IN AIR - gravity, light drag, no swim accel (touch ignored)
+      cat.vy += 700 * dt; // gravity
+      const airDrag = Math.pow(0.65, dt);
+      cat.vx *= airDrag;
+      // No vy drag - let gravity dominate
+      speed = Math.hypot(cat.vx, cat.vy);
+    }
+    cat.x += cat.vx * dt;
+    cat.y += cat.vy * dt;
+    if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
+    // Surface crossing detection - splash both ways
+    const isUnderwaterNow = cat.y >= SURFACE_Y;
+    if (wasUnderwater !== isUnderwaterNow) {
+      const intensity = Math.min(1.5, Math.abs(cat.vy) / 250 + 0.3);
+      spawnSplash(cat.x, SURFACE_Y, intensity);
+      splashSound(intensity);
+    }
+  }
+  // Clamp to world (allow above-surface jumps; sub can go even higher)
+  cat.x = Math.max(50, Math.min(WORLD_W - 50, cat.x));
+  cat.y = Math.max(SURFACE_Y - 550, Math.min(SAND_TOP - 30, cat.y));
+  // Smooth scale lerp
+  cat.scale += (cat.targetScale - cat.scale) * Math.min(1, dt * 5);
+  // Tick down hurt + invuln timers
+  if (cat.invuln > 0) cat.invuln = Math.max(0, cat.invuln - dt);
+  if (cat.hurtT > 0) cat.hurtT = Math.max(0, cat.hurtT - dt);
+  // Animation
+  cat.paddle += dt * (4 + speed * 0.018);
+  cat.tail += dt * (2.5 + speed * 0.012);
+  // Blink occasionally
+  cat.blinkT -= dt;
+  if (cat.blinkT < 0) {
+    if (cat.blinking) {
+      cat.blinking = false;
+      cat.blinkT = 2 + Math.random() * 4;
+    } else {
+      cat.blinking = true;
+      cat.blinkT = 0.12;
+    }
+  }
+  // Helmet bubble trail (only underwater)
+  bubbleTrailT -= dt;
+  if (bubbleTrailT < 0 && speed > 50 && cat.y >= SURFACE_Y) {
+    spawnHelmetBubble();
+    bubbleTrailT = 0.18;
+  }
+
+  // --- Camera ---
+  const camTargetX = cat.x - W / 2;
+  const camTargetY = cat.y - H / 2;
+  const camLerp = Math.min(1, dt * 4);
+  camera.x += (camTargetX - camera.x) * camLerp;
+  camera.y += (camTargetY - camera.y) * camLerp;
+  camera.x = Math.max(0, Math.min(WORLD_W - W, camera.x));
+  // Allow camera to follow cat/sub above the world top into the sky
+  camera.y = Math.max(-550, Math.min(WORLD_H - H, camera.y));
+
+  // --- Update sea life ---
+  for (const f of fish) {
+    f.x += f.dir * f.speed * dt;
+    f.wiggle += dt * 8;
+    applyBoost(f, dt);
+    if (f.x < 50) { f.x = 50; f.dir = 1; }
+    if (f.x > WORLD_W - 50) { f.x = WORLD_W - 50; f.dir = -1; }
+  }
+  for (const f of bigfish) {
+    f.x += f.dir * f.speed * dt;
+    f.wiggle += dt * 4;
+    applyBoost(f, dt);
+    if (f.x < 100) { f.x = 100; f.dir = 1; }
+    if (f.x > WORLD_W - 100) { f.x = WORLD_W - 100; f.dir = -1; }
+  }
+  for (const j of jellies) {
+    j.y -= j.riseSpeed * dt;
+    applyBoost(j, dt);
+    if (j.y < SURFACE_Y - 50) j.y = SAND_TOP - 50;
+  }
+  // Seahorses drift gently around their home spot
+  for (const sh of seahorses) {
+    applyBoost(sh, dt);
+    const tNow = Date.now() * 0.001;
+    sh.x = sh.homeX + Math.sin(tNow * 0.4 + sh.driftSeed) * 25;
+    sh.y = sh.homeY + Math.cos(tNow * 0.5 + sh.bobSeed) * 30;
+  }
+  // Sharks
+  for (const sh of sharks) {
+    if (sh.state === 'gone') continue;
+    sh.wiggle += dt * 5;
+    if (sh.wobbleT > 0) sh.wobbleT = Math.max(0, sh.wobbleT - dt);
+    // Decay boop count if no recent boop
+    const tNow2 = performance.now() / 1000;
+    if (sh.boopCount > 0 && tNow2 - sh.boopT > 3) sh.boopCount = 0;
+    if (sh.state === 'flee') {
+      sh.fleeT += dt;
+      sh.x += sh.dir * sh.speed * dt;
+      // Slow down after the initial dash so they don't fly forever
+      if (sh.fleeT > 3) {
+        sh.speed = Math.max(sh.baseSpeed * 0.5, sh.speed - dt * 60);
+      }
+      // Stay inside the world - if they hit an edge, they chill there
+      if (sh.x < 100) { sh.x = 100; sh.speed = Math.max(0, sh.speed - dt * 200); }
+      if (sh.x > WORLD_W - 100) { sh.x = WORLD_W - 100; sh.speed = Math.max(0, sh.speed - dt * 200); }
+      continue;
+    }
+    // Roaming
+    sh.x += sh.dir * sh.speed * dt;
+    if (sh.x < 100) { sh.x = 100; sh.dir = 1; }
+    if (sh.x > WORLD_W - 100) { sh.x = WORLD_W - 100; sh.dir = -1; }
+  }
+  // Shark-vs-cat collision (gentle hurt with invincibility)
+  // Skipped: when cat is bigger than shark (eating wins), in air, in toilet, or in sub
+  if (cat.invuln <= 0 && cat.toiletState === 'free' && cat.subState === 'free' && cat.y >= SURFACE_Y) {
+    const catR = getCatRadius();
+    for (const sh of sharks) {
+      if (sh.state !== 'roam') continue;
+      if (catR > sh.size) continue; // too small to hurt - cat will eat instead
+      const dx = cat.x - sh.x, dy = cat.y - sh.y;
+      const r = sh.size * 0.85 + catR * 0.7; // shark hitbox + cat radius
+      if (dx * dx + dy * dy < r * r) {
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        const knock = 380;
+        cat.vx = (dx / dist) * knock;
+        cat.vy = (dy / dist) * knock - 60;
+        cat.invuln = 1.5;
+        cat.hurtT = 0.7;
+        spawnSparks(cat.x, cat.y - 10);
+        hurtSound();
+        break;
+      }
+    }
+  }
+
+  // --- Cat eats anything smaller than itself (only underwater, never in sub) ---
+  if (cat.toiletState === 'free' && cat.subState === 'free' && cat.y >= SURFACE_Y) {
+    const catR = getCatRadius();
+    // Eat one small fish per frame (lots of small fish = otherwise mass-spam)
+    for (let i = fish.length - 1; i >= 0; i--) {
+      const f = fish[i];
+      if (catR <= f.size) continue;
+      const dx = f.x - cat.x, dy = f.y - cat.y;
+      const rr = catR * 0.7 + f.size * 0.5;
+      if (dx * dx + dy * dy < rr * rr) {
+        fish.splice(i, 1);
+        fish.push(makeFish()); // respawn off-screen
+        onEat(0.06);
+        break;
+      }
+    }
+    // Eat one seahorse
+    for (let i = seahorses.length - 1; i >= 0; i--) {
+      const s = seahorses[i];
+      if (catR <= s.size) continue;
+      const dx = s.x - cat.x, dy = s.y - cat.y;
+      const rr = catR * 0.7 + s.size * 0.5;
+      if (dx * dx + dy * dy < rr * rr) {
+        seahorses.splice(i, 1);
+        onEat(0.09);
+        break;
+      }
+    }
+    // Eat one jelly
+    for (let i = jellies.length - 1; i >= 0; i--) {
+      const j = jellies[i];
+      if (catR <= j.size) continue;
+      const dx = j.x - cat.x, dy = j.y - cat.y;
+      const rr = catR * 0.7 + j.size * 0.5;
+      if (dx * dx + dy * dy < rr * rr) {
+        jellies.splice(i, 1);
+        onEat(0.14);
+        break;
+      }
+    }
+    // Eat one bigfish
+    for (let i = bigfish.length - 1; i >= 0; i--) {
+      const f = bigfish[i];
+      if (catR <= f.size) continue;
+      const dx = f.x - cat.x, dy = f.y - cat.y;
+      const rr = catR * 0.7 + f.size * 0.5;
+      if (dx * dx + dy * dy < rr * rr) {
+        bigfish.splice(i, 1);
+        bigfish.push(makeBigFish());
+        onEat(0.24);
+        break;
+      }
+    }
+    // Eat one shark (only when cat is big enough)
+    for (let i = sharks.length - 1; i >= 0; i--) {
+      const sh = sharks[i];
+      if (sh.state === 'gone') continue;
+      if (catR <= sh.size) continue;
+      const dx = sh.x - cat.x, dy = sh.y - cat.y;
+      const rr = catR * 0.7 + sh.size * 0.5;
+      if (dx * dx + dy * dy < rr * rr) {
+        sharks.splice(i, 1);
+        onEat(0.4);
+        break;
+      }
+    }
+  }
+
+  // Update splash droplets (gravity)
+  for (let i = splashes.length - 1; i >= 0; i--) {
+    const s = splashes[i];
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    s.vy += 900 * dt;
+    s.life -= dt;
+    if (s.life <= 0 || s.y > SURFACE_Y + 80) splashes.splice(i, 1);
+  }
+  // Update fart particles
+  for (let i = farts.length - 1; i >= 0; i--) {
+    const f = farts[i];
+    f.x += f.vx * dt;
+    f.y += f.vy * dt;
+    f.vx *= 0.94;
+    f.vy *= 0.94;
+    f.size += dt * 8;
+    f.life -= dt;
+    if (f.life <= 0) farts.splice(i, 1);
+  }
+  // Tick down speech timer
+  if (speechT > 0) speechT -= dt;
+  // Update sparks
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i];
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    s.vx *= 0.96;
+    s.vy *= 0.96;
+    s.vy += 30 * dt;
+    s.rot += s.vrot * dt;
+    s.life -= dt;
+    if (s.life <= 0) sparks.splice(i, 1);
+  }
+  for (const b of bubbles) {
+    b.y -= b.speed * dt;
+    if (b.y < 0) { b.y = WORLD_H; b.x = (b.x + 137.3) % WORLD_W; }
+  }
+  for (let i = helmetBubbles.length - 1; i >= 0; i--) {
+    const b = helmetBubbles[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.life -= dt * 0.6;
+    if (b.life <= 0) helmetBubbles.splice(i, 1);
+  }
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i];
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.vy += 60 * dt; // gravity (water drag handled by reducing)
+    c.vx *= 0.99;
+    c.vy *= 0.99;
+    c.rot += c.vrot * dt;
+    c.life -= dt;
+    if (c.life <= 0) confetti.splice(i, 1);
+  }
+
+  // --- Ambient bubble sfx ---
+  if (t > nextBubbleAt) {
+    bubbleSound();
+    nextBubbleAt = t + 3000 + Math.random() * 5000;
+  }
+
+  // ===== Render =====
+  drawBackground();
+  drawBubbles();
+  drawSand();
+  // Sand decor
+  for (const s of shells) drawShell(s);
+  for (const s of starfishes) drawStarfish(s);
+  // Stationary world objects
+  for (const r of rocks) drawRock(r);
+  for (const k of kelps) drawKelp(k);
+  for (const c of corals) drawCoral(c);
+  // Sea life
+  for (const j of jellies) drawJelly(j);
+  for (const sh of seahorses) drawSeahorse(sh);
+  for (const f of bigfish) drawBigFish(f);
+  for (const f of fish) drawFish(f);
+  // Sharks (above smaller fish so they read as the "big" creature)
+  for (const sh of sharks) drawShark(sh);
+  // Toilets (drawn behind cat so cat sits ON them)
+  for (const tl of toilets) drawToilet(tl);
+  // Submarines (in front of fish so they read as vehicles)
+  for (const s of subs) drawSub(s);
+  // Helmet bubble trail
+  drawHelmetBubbles();
+  // Fart cloud (behind cat so cat is in front of own toot)
+  drawFarts();
+  // Cat
+  drawCat();
+  // Speech bubble above cat
+  drawSpeech();
+  // Sparks/stars over cat
+  drawSparks();
+  // Splash droplets (over cat so they appear on her too)
+  drawSplashes();
+  // Confetti
+  drawConfetti();
+  // HUD on top
+  drawHUD();
+  drawColorPicker();
+  drawSubExitButton();
+  } catch (err) {
+    showError(err);
+  }
+  // Always draw the error overlay last (even on the next clean frame)
+  try { drawErrorOverlay(); } catch (e) { /* swallow */ }
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
