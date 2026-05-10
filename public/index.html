@@ -805,9 +805,12 @@ function dispatchTap(sx, sy) {
     touchActive = false;
     return;
   }
-  // Any other tap wakes a sleeping cat first, then continues processing
-  if (cat.bedState !== 'free') {
+  // Tap while sleeping/going to bed: wake up only - don't also process this tap
+  // (clearer for a 3yo: first tap wakes, second tap does the action)
+  if (cat.bedState === 'sleeping' || cat.bedState === 'going') {
     wakeUp();
+    touchActive = false;
+    return;
   }
   if (handleToiletTap(sx, sy)) {
     touchActive = false;
@@ -854,7 +857,14 @@ function handleBedTap(screenX, screenY) {
 }
 
 function wakeUp() {
-  if (cat.bedState === 'sleeping' || cat.bedState === 'going') {
+  if (cat.bedState === 'sleeping') {
+    if (cat.bedTarget) cat.bedTarget.inUse = false;
+    cat.bedState = 'leaving';
+    cat.bedT = 0.55;
+    cat.vy = -340;
+    cat.vx = cat.facing * 240;
+    cat.bedTarget = null;
+  } else if (cat.bedState === 'going') {
     if (cat.bedTarget) cat.bedTarget.inUse = false;
     cat.bedState = 'free';
     cat.bedTarget = null;
@@ -2784,6 +2794,18 @@ function loop(t) {
       zSpawnT = 0.7 + Math.random() * 0.5;
     }
     speed = 0;
+  } else if (cat.bedState === 'leaving') {
+    // Brief auto-swim away from the bed, ignoring player input
+    cat.bedT -= dt;
+    cat.x += cat.vx * dt;
+    cat.y += cat.vy * dt;
+    cat.vx *= Math.pow(0.4, dt);
+    cat.vy *= Math.pow(0.4, dt);
+    if (cat.bedT <= 0) {
+      cat.bedState = 'free';
+    }
+    speed = Math.hypot(cat.vx, cat.vy);
+    if (Math.abs(cat.vx) > 25) cat.facing = cat.vx > 0 ? 1 : -1;
   } else if (cat.subState === 'entering') {
     // Auto-swim cat toward the sub, then climb in
     const sub = cat.activeSub;
