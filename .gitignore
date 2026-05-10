@@ -13,3 +13,10 @@ Thumbs.db
 # Local-only files we don't need on the hosted version
 # (the .bat and README.txt stay in the repo for documentation,
 # but they're outside public/ so they're not deployed)
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
